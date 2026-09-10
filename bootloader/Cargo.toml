@@ -1,0 +1,9 @@
+[package]
+name = "lunix-bootloader"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+lunix-common = { path = "../common" }
+uefi = { version = "0.33", default-features = false, features = ["alloc", "logger"] }
+log = "0.4"

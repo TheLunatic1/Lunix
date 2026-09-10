@@ -1,0 +1,26 @@
+# Rust compilation artifacts
+target/
+**/*.rs.bk
+*.pdb
+
+# Operating system images and firmware
+*.img
+*.iso
+*.bin
+*.fd
+
+# Local tools & emulators
+tools/
+tools/qemu/
+
+# IDE and Editor configs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Logs and temporary files
+*.log
