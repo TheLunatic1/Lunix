@@ -1,68 +1,79 @@
 use core::fmt;
+use core::sync::atomic::{AtomicUsize, Ordering};
 use spin::Mutex;
 
-const RX_BUFFER_SIZE: usize = 4096;
+const RX_BUFFER_SIZE: usize = 8192;
+static mut RX_BUFFER: [u8; RX_BUFFER_SIZE] = [0; RX_BUFFER_SIZE];
+static RX_HEAD: AtomicUsize = AtomicUsize::new(0);
+static RX_TAIL: AtomicUsize = AtomicUsize::new(0);
 
-struct SerialQueue {
-    buffer: [u8; RX_BUFFER_SIZE],
-    head: usize,
-    tail: usize,
-}
-
-static RX_QUEUE: Mutex<SerialQueue> = Mutex::new(SerialQueue {
-    buffer: [0; RX_BUFFER_SIZE],
-    head: 0,
-    tail: 0,
-});
+static SERIAL_PORT_LOCK: Mutex<()> = Mutex::new(());
+static POLL_LOCK: Mutex<()> = Mutex::new(());
 
 pub fn init() {
-    unsafe {
-        // Disable all interrupts during config
-        crate::arch::x86_64::io::outb(0x3F9, 0x00);
-        // Enable DLAB (set baud rate divisor)
-        crate::arch::x86_64::io::outb(0x3FB, 0x80);
-        // Set divisor to 1 (115200 baud)
-        crate::arch::x86_64::io::outb(0x3F8, 0x01);
-        crate::arch::x86_64::io::outb(0x3F9, 0x00);
-        // 8 bits, no parity, one stop bit
-        crate::arch::x86_64::io::outb(0x3FB, 0x03);
-        // Enable FIFO, clear TX/RX FIFO, 1-byte trigger threshold (0x07)
-        crate::arch::x86_64::io::outb(0x3FA, 0x07);
-        // Enable auxiliary output 2 (OUT2), RTS, DTR
-        crate::arch::x86_64::io::outb(0x3FC, 0x0B);
-        // Enable Received Data Available interrupt in IER (port 0x3F9, bit 0 = 1)
-        crate::arch::x86_64::io::outb(0x3F9, 0x01);
-    }
+    let iir = x86_64::instructions::interrupts::without_interrupts(|| {
+        let _guard = SERIAL_PORT_LOCK.lock();
+        unsafe {
+            // Disable all interrupts during config
+            crate::arch::x86_64::io::outb(0x3F9, 0x00);
+            // Enable DLAB (set baud rate divisor)
+            crate::arch::x86_64::io::outb(0x3FB, 0x80);
+            // Set divisor to 1 (115200 baud)
+            crate::arch::x86_64::io::outb(0x3F8, 0x01);
+            crate::arch::x86_64::io::outb(0x3F9, 0x00);
+            // 8 bits, no parity, one stop bit
+            crate::arch::x86_64::io::outb(0x3FB, 0x03);
+            // Enable FIFO, clear TX/RX FIFO, 1-byte trigger threshold (0x07)
+            crate::arch::x86_64::io::outb(0x3FA, 0x07);
+            // Enable auxiliary output 2 (OUT2), RTS, DTR (0x0B)
+            crate::arch::x86_64::io::outb(0x3FC, 0x0B);
+            // Enable Received Data Available and Line Status interrupts in IER (0x05)
+            crate::arch::x86_64::io::outb(0x3F9, 0x05);
+
+            // Flush / Clear any residual status registers
+            let _ = crate::arch::x86_64::io::inb(0x3F8);
+            let _ = crate::arch::x86_64::io::inb(0x3FD);
+            let iir = crate::arch::x86_64::io::inb(0x3FA);
+            let _ = crate::arch::x86_64::io::inb(0x3FE);
+
+            iir
+        }
+    });
+
+    write_str("  [SERIAL] 16550 UART Configured (IIR: ");
+    write_hex(iir as u64);
+    write_str(")\n");
 }
 
+#[inline(always)]
 pub fn poll_hardware() {
-    x86_64::instructions::interrupts::without_interrupts(|| {
+    if let Some(_guard) = POLL_LOCK.try_lock() {
         unsafe {
             while (crate::arch::x86_64::io::inb(0x3FD) & 1) != 0 {
-                let b = crate::arch::x86_64::io::inb(0x3F8);
-                let mut queue = RX_QUEUE.lock();
-                let next_head = (queue.head + 1) % RX_BUFFER_SIZE;
-                if next_head != queue.tail {
-                    let h = queue.head;
-                    queue.buffer[h] = b;
-                    queue.head = next_head;
+                let byte = crate::arch::x86_64::io::inb(0x3F8);
+                let head = RX_HEAD.load(Ordering::Acquire);
+                let next_head = (head + 1) % RX_BUFFER_SIZE;
+                let tail = RX_TAIL.load(Ordering::Acquire);
+                if next_head != tail {
+                    RX_BUFFER[head] = byte;
+                    RX_HEAD.store(next_head, Ordering::Release);
                 }
             }
         }
-    });
+    }
 }
 
+#[inline(always)]
 pub fn pop_byte() -> Option<u8> {
-    x86_64::instructions::interrupts::without_interrupts(|| {
-        let mut queue = RX_QUEUE.lock();
-        if queue.head != queue.tail {
-            let b = queue.buffer[queue.tail];
-            queue.tail = (queue.tail + 1) % RX_BUFFER_SIZE;
-            Some(b)
-        } else {
-            None
-        }
-    })
+    let tail = RX_TAIL.load(Ordering::Acquire);
+    let head = RX_HEAD.load(Ordering::Acquire);
+    if tail != head {
+        let b = unsafe { RX_BUFFER[tail] };
+        RX_TAIL.store((tail + 1) % RX_BUFFER_SIZE, Ordering::Release);
+        Some(b)
+    } else {
+        None
+    }
 }
 
 pub fn drain_input<F: FnMut(u8)>(mut handler: F) {
@@ -72,29 +83,39 @@ pub fn drain_input<F: FnMut(u8)>(mut handler: F) {
     }
 }
 
-pub fn write_byte(byte: u8) {
+#[inline]
+unsafe fn write_raw_byte_unlocked(byte: u8) {
+    poll_hardware();
+
+    // Wait for transmitter holding register empty (THRE)
+    while (crate::arch::x86_64::io::inb(0x3FD) & 0x20) == 0 {
+        poll_hardware();
+        core::hint::spin_loop();
+    }
+
+    // Output the byte
+    crate::arch::x86_64::io::outb(0x3F8, byte);
+}
+
+#[inline]
+pub fn write_raw_byte(byte: u8) {
     x86_64::instructions::interrupts::without_interrupts(|| {
+        let _guard = SERIAL_PORT_LOCK.lock();
         unsafe {
-            for _ in 0..100_000 {
-                while (crate::arch::x86_64::io::inb(0x3FD) & 1) != 0 {
-                    let rx_b = crate::arch::x86_64::io::inb(0x3F8);
-                    let mut queue = RX_QUEUE.lock();
-                    let next_head = (queue.head + 1) % RX_BUFFER_SIZE;
-                    if next_head != queue.tail {
-                        let h = queue.head;
-                        queue.buffer[h] = rx_b;
-                        queue.head = next_head;
-                    }
-                }
-                let lsr = crate::arch::x86_64::io::inb(0x3FD);
-                if (lsr & 0x20) != 0 {
-                    break;
-                }
-                core::hint::spin_loop();
-            }
-            crate::arch::x86_64::io::outb(0x3F8, byte);
+            write_raw_byte_unlocked(byte);
         }
     });
+}
+
+pub fn write_byte(byte: u8) {
+    if byte == b'\x08' {
+        // Erase character on ANSI/VT100 terminal: backspace, space, backspace
+        write_raw_byte(b'\x08');
+        write_raw_byte(b' ');
+        write_raw_byte(b'\x08');
+    } else {
+        write_raw_byte(byte);
+    }
 }
 
 pub struct DirectSerialWriter;
@@ -114,26 +135,16 @@ pub fn _print(args: fmt::Arguments) {
 
 pub fn write_str(s: &str) {
     x86_64::instructions::interrupts::without_interrupts(|| {
-        for byte in s.bytes() {
-            unsafe {
-                for _ in 0..100_000 {
-                    while (crate::arch::x86_64::io::inb(0x3FD) & 1) != 0 {
-                        let rx_b = crate::arch::x86_64::io::inb(0x3F8);
-                        let mut queue = RX_QUEUE.lock();
-                        let next_head = (queue.head + 1) % RX_BUFFER_SIZE;
-                        if next_head != queue.tail {
-                            let h = queue.head;
-                            queue.buffer[h] = rx_b;
-                            queue.head = next_head;
-                        }
-                    }
-                    let lsr = crate::arch::x86_64::io::inb(0x3FD);
-                    if (lsr & 0x20) != 0 {
-                        break;
-                    }
-                    core::hint::spin_loop();
+        let _guard = SERIAL_PORT_LOCK.lock();
+        unsafe {
+            for byte in s.bytes() {
+                if byte == b'\x08' {
+                    write_raw_byte_unlocked(b'\x08');
+                    write_raw_byte_unlocked(b' ');
+                    write_raw_byte_unlocked(b'\x08');
+                } else {
+                    write_raw_byte_unlocked(byte);
                 }
-                crate::arch::x86_64::io::outb(0x3F8, byte);
             }
         }
     });

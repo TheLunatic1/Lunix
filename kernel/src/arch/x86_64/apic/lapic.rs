@@ -78,7 +78,9 @@ pub unsafe fn init(base_addr: u64) {
     // Enable APIC by setting bit 8 in SVR and configuring spurious interrupt vector
     lapic_write(LAPIC_SVR, APIC_SW_ENABLE | (SPURIOUS_VECTOR as u32));
 
-    lunix_serial_println!("  [LAPIC] Initialized on CPU core (APIC ID: {}, SVR: 0x{:X})", id(), lapic_read(LAPIC_SVR));
+    if id() == 0 {
+        lunix_serial_println!("  [LAPIC] Initialized on CPU core (APIC ID: {}, SVR: 0x{:X})", id(), lapic_read(LAPIC_SVR));
+    }
 }
 
 /// Returns the Local APIC ID of the calling CPU core.

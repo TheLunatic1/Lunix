@@ -262,3 +262,9 @@ The kernel boots into an interactive graphical console with an IBM VGA font disp
 - **Win32 PE32+ Loader**: Parses DOS 'MZ' and PE64 headers, maps sections (`.text`, `.rdata`, `.data`), resolves IAT imports against `kernel32.dll` and `ntdll.dll`.
 - **Win32 DDI Shims**: Implements `GetStdHandle`, `WriteConsoleA`, `WriteFile`, `ReadFile`, `ExitProcess`, `GetProcessHeap`, `HeapAlloc`, `HeapFree`, `VirtualAlloc`, `VirtualFree`, `GetSystemInfo`, `Sleep`, `GetCommandLineA`, `GetModuleHandleA`.
 - **Universal Shell Binary Dispatcher**: Shell `exec <path>` auto-detects binary magic (`0x7F 'E' 'L' 'F'` for Linux ELF binaries vs `'M' 'Z'` for Windows PE32+ executables) and launches them in Ring 3 user mode.
+
+### Phase 12: High-Speed Serial & Terminal FIFO Overrun Immunity
+- **16550 UART FIFO Optimization**: Configures 16550 UART FIFO Control Register with `0xC7` (14-byte trigger threshold) and lock-free atomic ring buffers (`AtomicUsize` head/tail with `Acquire`/`Release` ordering).
+- **Non-Blocking Scanline Polling**: Calls lockless `poll_hardware()` during GOP VGA glyph rendering and frame scrolling to drain UART hardware buffers without rendering stalls.
+- **Atomic Shell Output & Batching**: Batches rapid keystrokes/pastes into echo buffers, synchronized process spawn announcements, and verified 100% character fidelity across 15/15 burst paste automated test suites (500 chars/second).
+

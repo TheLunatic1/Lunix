@@ -556,19 +556,11 @@ fn execute_command(cmd: &str) -> ExecResult {
     ExecResult::Done
 }
 
-const SCANCODE_QUEUE_SIZE: usize = 512;
-
-struct ScancodeQueue {
-    buffer: [u8; SCANCODE_QUEUE_SIZE],
-    head: usize,
-    tail: usize,
-}
-
-static SCANCODE_QUEUE: Mutex<ScancodeQueue> = Mutex::new(ScancodeQueue {
-    buffer: [0; SCANCODE_QUEUE_SIZE],
-    head: 0,
-    tail: 0,
-});
+const SCANCODE_QUEUE_SIZE: usize = 1024;
+static mut SCANCODE_BUF: [u8; SCANCODE_QUEUE_SIZE] = [0; SCANCODE_QUEUE_SIZE];
+static SCANCODE_HEAD: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+static SCANCODE_TAIL: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+static PS2_HARDWARE_LOCK: Mutex<()> = Mutex::new(());
 
 static LAST_WAS_CR: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
@@ -596,97 +588,175 @@ pub fn handle_serial_byte(b: u8) {
     }
 }
 
+pub fn handle_chars(chars: &[char]) {
+    let mut echo_buf = String::new();
+
+    for &ch in chars {
+        match ch {
+            '\r' | '\n' => {
+                if !echo_buf.is_empty() {
+                    lunix_print!("{}", echo_buf);
+                    echo_buf.clear();
+                }
+                lunix_println!("");
+                let cmd = {
+                    let mut buf = COMMAND_BUFFER.lock();
+                    let res = buf.clone();
+                    buf.clear();
+                    res
+                };
+                let res = execute_command(&cmd);
+                if res == ExecResult::Done {
+                    print_prompt();
+                }
+            }
+            '\x08' => {
+                if !echo_buf.is_empty() {
+                    lunix_print!("{}", echo_buf);
+                    echo_buf.clear();
+                }
+                let mut buf = COMMAND_BUFFER.lock();
+                if !buf.is_empty() {
+                    buf.pop();
+                    drop(buf);
+                    lunix_print!("\x08");
+                }
+            }
+            c => {
+                if c >= ' ' && c <= '~' {
+                    let mut buf = COMMAND_BUFFER.lock();
+                    buf.push(c);
+                    drop(buf);
+                    echo_buf.push(c);
+                }
+            }
+        }
+    }
+
+    if !echo_buf.is_empty() {
+        lunix_print!("{}", echo_buf);
+    }
+}
+
 pub fn handle_char(character: char) {
-    let mut buffer = COMMAND_BUFFER.lock();
-    match character {
-        '\r' | '\n' => {
-            lunix_println!("");
-            let cmd = buffer.clone();
-            buffer.clear();
-            drop(buffer);
-
-            let res = execute_command(&cmd);
-            if res == ExecResult::Done {
-                print_prompt();
-            }
-        }
-        '\x08' => {
-            // Backspace
-            if !buffer.is_empty() {
-                buffer.pop();
-                lunix_print!("\x08");
-            }
-        }
-        ch => {
-            if ch >= ' ' && ch <= '~' {
-                buffer.push(ch);
-                lunix_print!("{}", ch);
-            }
-        }
-    }
+    handle_chars(&[character]);
 }
 
-pub fn on_interrupt() {
-    let scancode = unsafe { inb(KEYBOARD_DATA_PORT) };
-    let mut queue = SCANCODE_QUEUE.lock();
-    let next_head = (queue.head + 1) % SCANCODE_QUEUE_SIZE;
-    if next_head != queue.tail {
-        let h = queue.head;
-        queue.buffer[h] = scancode;
-        queue.head = next_head;
-    }
-}
-
-pub fn process_pending_input() {
-    // 1. Process all pending PS/2 keyboard scancodes
-    loop {
-        let scancode = {
-            let mut queue = SCANCODE_QUEUE.lock();
-            if queue.head != queue.tail {
-                let code = queue.buffer[queue.tail];
-                queue.tail = (queue.tail + 1) % SCANCODE_QUEUE_SIZE;
-                Some(code)
-            } else {
-                None
-            }
-        };
-
-        match scancode {
-            Some(code) => {
-                let mut keyboard_lock = KEYBOARD.lock();
-                if let Some(ref mut keyboard) = *keyboard_lock {
-                    if let Ok(Some(key_event)) = keyboard.add_byte(code) {
-                        if let Some(key) = keyboard.process_keyevent(key_event) {
-                            drop(keyboard_lock);
-                            match key {
-                                DecodedKey::Unicode(character) => {
-                                    handle_char(character);
-                                }
-                                DecodedKey::RawKey(_) => {}
-                            }
+pub fn poll_ps2_hardware() {
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        if let Some(_guard) = PS2_HARDWARE_LOCK.try_lock() {
+            unsafe {
+                for _ in 0..128 {
+                    let status = inb(0x64);
+                    if (status & 0x01) == 0 {
+                        break;
+                    }
+                    if (status & 0x20) == 0 {
+                        // PS/2 Keyboard scancode byte
+                        let scancode = inb(KEYBOARD_DATA_PORT);
+                        let head = SCANCODE_HEAD.load(core::sync::atomic::Ordering::Acquire);
+                        let next_head = (head + 1) % SCANCODE_QUEUE_SIZE;
+                        let tail = SCANCODE_TAIL.load(core::sync::atomic::Ordering::Acquire);
+                        if next_head != tail {
+                            SCANCODE_BUF[head] = scancode;
+                            SCANCODE_HEAD.store(next_head, core::sync::atomic::Ordering::Release);
                         }
+                    } else {
+                        // Mouse packet byte, route to PS/2 mouse driver
+                        crate::drivers::mouse::on_interrupt();
                     }
                 }
             }
-            None => break,
+        }
+    });
+}
+
+pub fn pop_scancode() -> Option<u8> {
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        let tail = SCANCODE_TAIL.load(core::sync::atomic::Ordering::Acquire);
+        let head = SCANCODE_HEAD.load(core::sync::atomic::Ordering::Acquire);
+        if tail != head {
+            let code = unsafe { SCANCODE_BUF[tail] };
+            SCANCODE_TAIL.store((tail + 1) % SCANCODE_QUEUE_SIZE, core::sync::atomic::Ordering::Release);
+            Some(code)
+        } else {
+            None
+        }
+    })
+}
+
+pub fn on_interrupt() {
+    poll_ps2_hardware();
+}
+
+pub fn process_pending_input() -> bool {
+    // 1. Drain both PS/2 keyboard and COM1 serial hardware buffers
+    poll_ps2_hardware();
+    crate::arch::x86_64::serial::poll_hardware();
+
+    let mut processed = false;
+
+    // 2. Process all pending PS/2 keyboard scancodes
+    let mut kbd_chars: alloc::vec::Vec<char> = alloc::vec::Vec::new();
+    while let Some(code) = pop_scancode() {
+        let mut keyboard_lock = KEYBOARD.lock();
+        if let Some(ref mut keyboard) = *keyboard_lock {
+            if let Ok(Some(key_event)) = keyboard.add_byte(code) {
+                if let Some(key) = keyboard.process_keyevent(key_event) {
+                    match key {
+                        DecodedKey::Unicode(character) => {
+                            kbd_chars.push(character);
+                        }
+                        DecodedKey::RawKey(_) => {}
+                    }
+                }
+            }
+        }
+    }
+    if !kbd_chars.is_empty() {
+        processed = true;
+        handle_chars(&kbd_chars);
+    }
+
+    // 3. Process all pending COM1 Serial RX bytes
+    let mut serial_chars: alloc::vec::Vec<char> = alloc::vec::Vec::new();
+    while let Some(b) = crate::arch::x86_64::serial::pop_byte() {
+        match b {
+            b'\r' => {
+                LAST_WAS_CR.store(true, core::sync::atomic::Ordering::Relaxed);
+                serial_chars.push('\n');
+            }
+            b'\n' => {
+                if !LAST_WAS_CR.swap(false, core::sync::atomic::Ordering::Relaxed) {
+                    serial_chars.push('\n');
+                }
+            }
+            8 | 127 => {
+                LAST_WAS_CR.store(false, core::sync::atomic::Ordering::Relaxed);
+                serial_chars.push('\x08');
+            }
+            other => {
+                LAST_WAS_CR.store(false, core::sync::atomic::Ordering::Relaxed);
+                if other >= 32 && other <= 126 {
+                    serial_chars.push(other as char);
+                }
+            }
         }
     }
 
-    // 2. Process all pending COM1 Serial RX bytes
-    loop {
-        crate::arch::x86_64::serial::poll_hardware();
-        if let Some(b) = crate::arch::x86_64::serial::pop_byte() {
-            handle_serial_byte(b);
-        } else {
-            break;
-        }
+    if !serial_chars.is_empty() {
+        processed = true;
+        handle_chars(&serial_chars);
     }
+
+    processed
 }
 
 pub fn run_shell_loop() -> ! {
     loop {
-        process_pending_input();
-        x86_64::instructions::hlt();
+        if !process_pending_input() {
+            x86_64::instructions::hlt();
+        }
     }
 }
 

@@ -37,7 +37,7 @@ pub struct Elf64Phdr {
 }
 
 pub const PT_LOAD: u32 = 1;
-pub const USER_STACK_BASE: u64 = 0x0000_7FFF_0000_0000;
+pub const USER_STACK_BASE: u64 = 0x0000_7FFF_2000_0000;
 pub const USER_STACK_SIZE: usize = 64 * 1024; // 64 KiB
 
 #[derive(Debug, Clone, Copy)]
@@ -188,8 +188,8 @@ pub fn exec_elf(path: &str) -> Result<usize, String> {
 
     *CURRENT_ELF_EXEC.lock() = Some(prog);
 
+    lunix_println!("[+] Spawned Ring 3 ELF process thread");
     let tid = crate::task::scheduler::spawn("elf_process", elf_runner_trampoline, 8);
-    lunix_println!("[+] Spawned Ring 3 ELF process thread (TID: {})", tid);
     Ok(tid)
 }
 

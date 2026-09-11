@@ -134,6 +134,8 @@ extern "x86-interrupt" fn double_fault_handler(
 }
 
 extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFrame) {
+    crate::arch::x86_64::serial::poll_hardware();
+    crate::drivers::keyboard::poll_ps2_hardware();
     crate::drivers::timer::on_tick();
     notify_eoi(InterruptIndex::Timer.as_u8());
 }

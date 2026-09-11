@@ -56,6 +56,7 @@ pub fn io_delay() {
 
 pub fn busy_wait_ms(ms: u64) {
     for _ in 0..ms {
+        crate::arch::x86_64::serial::poll_hardware();
         for _ in 0..1000 {
             io_delay();
         }
@@ -70,6 +71,7 @@ pub fn sleep_ms(ms: u64) {
 
     let start = get_ticks();
     while get_ticks().saturating_sub(start) < ms {
+        crate::arch::x86_64::serial::poll_hardware();
         x86_64::instructions::hlt();
     }
 }

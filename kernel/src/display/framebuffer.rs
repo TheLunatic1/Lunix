@@ -1,4 +1,4 @@
-use crate::display::font::{FONT_BASIC, FONT_WIDTH};
+use crate::display::font::FONT_BASIC;
 use lunix_common::{FramebufferInfo, PixelFormat};
 
 #[derive(Debug, Clone, Copy)]
@@ -79,7 +79,10 @@ impl Framebuffer {
             _ => (0xFF << 24) | ((color.r as u32) << 16) | ((color.g as u32) << 8) | (color.b as u32),
         };
 
-        for row in y..(y + height).min(self.info.height) {
+        for (i, row) in (y..(y + height).min(self.info.height)).enumerate() {
+            if (i & 1) == 0 {
+                crate::arch::x86_64::serial::poll_hardware();
+            }
             let row_start = (self.info.base_address + (row * self.info.stride + x) as u64 * 4) as *mut u32;
             let count = width.min(self.info.width.saturating_sub(x));
             for col in 0..count {
@@ -108,21 +111,33 @@ impl Framebuffer {
         };
 
         let glyph = FONT_BASIC[glyph_idx];
+        let fg64 = fg_val as u64;
+        let bg64 = bg_val as u64;
 
-        for (row, byte) in glyph.iter().enumerate() {
+        for (row, &byte) in glyph.iter().enumerate() {
+            if (row & 1) == 0 {
+                crate::arch::x86_64::serial::poll_hardware();
+            }
             let py = y + row;
-            if py >= self.info.height {
+            if py >= self.info.height || x + 8 > self.info.width {
                 continue;
             }
-            let row_start = (self.info.base_address + (py * self.info.stride + x) as u64 * 4) as *mut u32;
-            for col in 0..FONT_WIDTH {
-                if x + col >= self.info.width {
-                    continue;
-                }
-                let bit = (byte >> (7 - col)) & 1;
-                unsafe {
-                    *row_start.add(col) = if bit == 1 { fg_val } else { bg_val };
-                }
+            let row_start = (self.info.base_address + (py * self.info.stride + x) as u64 * 4) as *mut u64;
+            
+            let p0 = if (byte & 0x80) != 0 { fg64 } else { bg64 };
+            let p1 = if (byte & 0x40) != 0 { fg64 } else { bg64 };
+            let p2 = if (byte & 0x20) != 0 { fg64 } else { bg64 };
+            let p3 = if (byte & 0x10) != 0 { fg64 } else { bg64 };
+            let p4 = if (byte & 0x08) != 0 { fg64 } else { bg64 };
+            let p5 = if (byte & 0x04) != 0 { fg64 } else { bg64 };
+            let p6 = if (byte & 0x02) != 0 { fg64 } else { bg64 };
+            let p7 = if (byte & 0x01) != 0 { fg64 } else { bg64 };
+
+            unsafe {
+                *row_start.add(0) = p0 | (p1 << 32);
+                *row_start.add(1) = p2 | (p3 << 32);
+                *row_start.add(2) = p4 | (p5 << 32);
+                *row_start.add(3) = p6 | (p7 << 32);
             }
         }
     }
@@ -149,7 +164,14 @@ impl Framebuffer {
         let dst = (self.info.base_address + (top * stride_bytes) as u64) as *mut u8;
 
         unsafe {
-            core::ptr::copy(src, dst, move_bytes);
+            let chunk_size = 1024;
+            let mut offset = 0;
+            while offset < move_bytes {
+                let current_chunk = chunk_size.min(move_bytes - offset);
+                core::ptr::copy(src.add(offset), dst.add(offset), current_chunk);
+                offset += current_chunk;
+                crate::arch::x86_64::serial::poll_hardware();
+            }
         }
 
         self.draw_rect(0, bottom - rows, self.info.width, rows, bg);

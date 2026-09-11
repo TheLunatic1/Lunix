@@ -544,7 +544,7 @@ pub fn exec_win32_pe(path: &str) -> Result<usize, &'static str> {
 
     *CURRENT_WIN32_EXEC.lock() = Some(process);
 
+    lunix_println!("[+] Starting Windows process '{}' (PE32+)...", path);
     let tid = scheduler::spawn("win32_app", win32_runner_trampoline, 6);
-    lunix_println!("[+] Started Windows process '{}' (PE32+) with PID/TID {}", path, tid);
     Ok(tid)
 }

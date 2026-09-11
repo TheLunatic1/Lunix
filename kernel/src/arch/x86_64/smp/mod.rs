@@ -189,7 +189,7 @@ fn boot_ap(apic_id: u8, ap_index: usize, pml4_addr: u64) {
 
     // Check if AP came online
     let mut online = false;
-    for _ in 0..100 {
+    for _ in 0..10_000 {
         if unsafe { (*params_ptr).ready_flag == 1 } {
             online = true;
             break;
@@ -204,14 +204,19 @@ fn boot_ap(apic_id: u8, ap_index: usize, pml4_addr: u64) {
         unsafe {
             lapic::send_ipi(apic_id, 0x600, 0x08, 1 << 14, 0);
         }
-        for _ in 0..100 {
+        for _ in 0..10_000 {
             if unsafe { (*params_ptr).ready_flag == 1 } {
+                online = true;
                 break;
             }
             for _ in 0..100 {
                 core::hint::spin_loop();
             }
         }
+    }
+
+    if online {
+        lunix_serial_println!("  [SMP-AP] Application Processor (APIC ID: {}) successfully booted and idling.", apic_id);
     }
 }
 
@@ -234,8 +239,6 @@ pub extern "sysv64" fn ap_entry() -> ! {
 
         AP_ONLINE_COUNT.fetch_add(1, Ordering::SeqCst);
     }
-
-    lunix_serial_println!("  [SMP-AP] Application Processor (APIC ID: {}) successfully booted and idling.", lapic::id());
 
     // Enable interrupts on this AP
     x86_64::instructions::interrupts::enable();

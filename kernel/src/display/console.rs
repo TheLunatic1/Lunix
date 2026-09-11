@@ -59,6 +59,7 @@ impl Console {
 
     pub fn write_char(&mut self, c: char) {
         crate::arch::x86_64::serial::poll_hardware();
+        crate::drivers::keyboard::poll_ps2_hardware();
         match c {
             '\n' => self.new_line(),
             '\r' => self.cursor_x = 0,
@@ -98,6 +99,7 @@ impl Console {
 
     pub fn new_line(&mut self) {
         crate::arch::x86_64::serial::poll_hardware();
+        crate::drivers::keyboard::poll_ps2_hardware();
         self.cursor_x = 0;
         if self.cursor_y + 1 < self.rows {
             self.cursor_y += 1;
