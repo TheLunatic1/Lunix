@@ -27,6 +27,28 @@ static TSS: SyncUnsafeCell<TaskStateSegment> = SyncUnsafeCell::new(TaskStateSegm
 static GDT: SyncUnsafeCell<GlobalDescriptorTable> =
     SyncUnsafeCell::new(GlobalDescriptorTable::new());
 
+#[derive(Clone, Copy, Debug)]
+pub struct Selectors {
+    pub kernel_code: SegmentSelector,
+    pub kernel_data: SegmentSelector,
+    pub user_data: SegmentSelector,
+    pub user_code: SegmentSelector,
+    pub tss: SegmentSelector,
+}
+
+static mut SELECTORS: Option<Selectors> = None;
+
+pub fn get_selectors() -> Selectors {
+    unsafe { SELECTORS.expect("GDT not initialized") }
+}
+
+pub fn set_kernel_stack(stack: u64) {
+    unsafe {
+        let tss = &mut *TSS.get();
+        tss.privilege_stack_table[0] = VirtAddr::new(stack);
+    }
+}
+
 pub fn init() {
     unsafe {
         let gdt = &mut *GDT.get();
@@ -39,17 +61,34 @@ pub fn init() {
         let stack_end = stack_start + (DOUBLE_FAULT_STACK_SIZE as u64);
         tss.interrupt_stack_table[DOUBLE_FAULT_IST_INDEX as usize] = stack_end;
 
-        let code_selector = gdt.append(Descriptor::kernel_code_segment());
-        let data_selector = gdt.append(Descriptor::kernel_data_segment());
+        // GDT layout for standard x86_64 syscall/sysret:
+        // Slot 1 (0x08): Kernel Code 64-bit
+        // Slot 2 (0x10): Kernel Data 64-bit
+        // Slot 3 (0x18 | 3 = 0x1B): User Data 64-bit
+        // Slot 4 (0x20 | 3 = 0x23): User Code 64-bit
+        // Slot 5 & 6 (0x28): Task State Segment
+        let kernel_code = gdt.append(Descriptor::kernel_code_segment());
+        let kernel_data = gdt.append(Descriptor::kernel_data_segment());
+        let user_data = gdt.append(Descriptor::user_data_segment());
+        let user_code = gdt.append(Descriptor::user_code_segment());
         let tss_selector = gdt.append(Descriptor::tss_segment(tss));
 
+        SELECTORS = Some(Selectors {
+            kernel_code,
+            kernel_data,
+            user_data,
+            user_code,
+            tss: tss_selector,
+        });
+
         gdt.load();
-        CS::set_reg(code_selector);
-        DS::set_reg(data_selector);
-        ES::set_reg(data_selector);
-        SS::set_reg(data_selector);
+        CS::set_reg(kernel_code);
+        DS::set_reg(kernel_data);
+        ES::set_reg(kernel_data);
+        SS::set_reg(kernel_data);
         FS::set_reg(SegmentSelector::NULL);
         GS::set_reg(SegmentSelector::NULL);
         load_tss(tss_selector);
     }
 }
+

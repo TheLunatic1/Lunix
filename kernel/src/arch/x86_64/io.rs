@@ -40,3 +40,17 @@ pub unsafe fn inl(port: u16) -> u32 {
 pub unsafe fn io_wait() {
     outb(0x80, 0);
 }
+
+#[inline]
+pub unsafe fn rdmsr(msr: u32) -> u64 {
+    let (high, low): (u32, u32);
+    asm!("rdmsr", in("ecx") msr, out("eax") low, out("edx") high, options(nomem, nostack, preserves_flags));
+    ((high as u64) << 32) | (low as u64)
+}
+
+#[inline]
+pub unsafe fn wrmsr(msr: u32, val: u64) {
+    let low = val as u32;
+    let high = (val >> 32) as u32;
+    asm!("wrmsr", in("ecx") msr, in("eax") low, in("edx") high, options(nomem, nostack, preserves_flags));
+}

@@ -202,6 +202,56 @@ pub fn scan_bus() {
     lunix_println!("[+] Discovered {} PCI hardware device(s).", device_count);
 }
 
+pub fn find_device(vendor_id: u16, device_id: u16) -> Option<PciDevice> {
+    for bus in 0..=1 {
+        for device in 0..32 {
+            if let Some(dev0) = scan_device(bus, device, 0) {
+                if dev0.vendor_id == vendor_id && dev0.device_id == device_id {
+                    return Some(dev0);
+                }
+                if (dev0.header_type & 0x80) != 0 {
+                    for function in 1..8 {
+                        if let Some(dev) = scan_device(bus, device, function) {
+                            if dev.vendor_id == vendor_id && dev.device_id == device_id {
+                                return Some(dev);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+pub fn find_by_class(class_code: u8, subclass: u8) -> Option<PciDevice> {
+    for bus in 0..=1 {
+        for device in 0..32 {
+            if let Some(dev0) = scan_device(bus, device, 0) {
+                if dev0.class_code == class_code && dev0.subclass == subclass {
+                    return Some(dev0);
+                }
+                if (dev0.header_type & 0x80) != 0 {
+                    for function in 1..8 {
+                        if let Some(dev) = scan_device(bus, device, function) {
+                            if dev.class_code == class_code && dev.subclass == subclass {
+                                return Some(dev);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+pub fn enable_bus_mastering(dev: &PciDevice) {
+    let mut command = pci_read_u16(dev.bus, dev.device, dev.function, 0x04);
+    command |= 0x0007; // I/O Space (bit 0) | Memory Space (bit 1) | Bus Master (bit 2)
+    pci_write_u32(dev.bus, dev.device, dev.function, 0x04, command as u32);
+}
+
 pub fn init() {
     scan_bus();
 }

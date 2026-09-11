@@ -46,7 +46,7 @@ impl Console {
         // Draw top status bar
         self.framebuffer.draw_rect(0, 0, self.framebuffer.info.width, 30, Color::DARK_GRAY);
         
-        let title = " LUNIX OS [x86_64 Long Mode] | Rust Bare-Metal Microkernel ";
+        let title = " LUNIX OS [x86_64 Long Mode] | Rust Bare-Metal Hybrid Kernel ";
         let mut x = 10;
         for c in title.chars() {
             self.framebuffer.draw_char(x, 7, c, Color::CYAN, Color::DARK_GRAY);
@@ -58,6 +58,7 @@ impl Console {
     }
 
     pub fn write_char(&mut self, c: char) {
+        crate::arch::x86_64::serial::poll_hardware();
         match c {
             '\n' => self.new_line(),
             '\r' => self.cursor_x = 0,
@@ -96,13 +97,14 @@ impl Console {
     }
 
     pub fn new_line(&mut self) {
+        crate::arch::x86_64::serial::poll_hardware();
         self.cursor_x = 0;
         if self.cursor_y + 1 < self.rows {
             self.cursor_y += 1;
         } else {
-            // Scroll screen up
-            self.framebuffer.scroll_up(FONT_HEIGHT, self.bg_color);
-            self.draw_header();
+            // Scroll text region up while keeping top header intact
+            let bottom = self.margin_top + self.rows * FONT_HEIGHT;
+            self.framebuffer.scroll_region_up(self.margin_top, bottom, FONT_HEIGHT, self.bg_color);
         }
     }
 
@@ -120,27 +122,30 @@ impl fmt::Write for Console {
 }
 
 pub static CONSOLE: Mutex<Option<Console>> = Mutex::new(None);
+pub static FRAMEBUFFER_INFO: Mutex<Option<FramebufferInfo>> = Mutex::new(None);
 
 pub fn init(info: FramebufferInfo) {
+    *FRAMEBUFFER_INFO.lock() = Some(info);
     let console = Console::new(info);
     *CONSOLE.lock() = Some(console);
+}
+
+pub fn get_framebuffer_info() -> Option<FramebufferInfo> {
+    *FRAMEBUFFER_INFO.lock()
 }
 
 #[doc(hidden)]
 pub fn _print_fmt(args: fmt::Arguments) {
     use core::fmt::Write;
-    use x86_64::instructions::interrupts;
 
-    interrupts::without_interrupts(|| {
-        // 1. Direct serial output for real-time debugging
-        let mut writer = crate::arch::x86_64::serial::DirectSerialWriter;
-        let _ = writer.write_fmt(args);
+    // 1. Direct serial output for real-time debugging
+    let mut writer = crate::arch::x86_64::serial::DirectSerialWriter;
+    let _ = writer.write_fmt(args);
 
-        // 2. Graphical framebuffer console rendering
-        if let Some(ref mut console) = *CONSOLE.lock() {
-            let _ = console.write_fmt(args);
-        }
-    });
+    // 2. Graphical framebuffer console rendering
+    if let Some(ref mut console) = *CONSOLE.lock() {
+        let _ = console.write_fmt(args);
+    }
 }
 
 #[macro_export]

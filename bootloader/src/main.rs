@@ -339,7 +339,21 @@ fn main() -> Status {
     };
     let boot_info_addr = boot_info_ptr.as_ptr() as u64;
 
-    // 4. Exit Boot Services & get memory map
+    // 4. Query ACPI RSDP pointer from UEFI Configuration Table
+    let rsdp_addr: Option<u64> = uefi::system::with_config_table(|entries| {
+        for entry in entries {
+            if entry.guid == uefi::table::cfg::ACPI2_GUID || entry.guid == uefi::table::cfg::ACPI_GUID {
+                return Some(entry.address as u64);
+            }
+        }
+        None
+    });
+
+    if let Some(addr) = rsdp_addr {
+        info!("[+] Discovered ACPI RSDP at physical address: 0x{:X}", addr);
+    }
+
+    // 5. Exit Boot Services & get memory map
     let final_mmap = unsafe { uefi::boot::exit_boot_services(MemoryType::LOADER_DATA) };
 
     let boot_info_ptr = boot_info_addr as *mut BootInfo;
@@ -355,7 +369,7 @@ fn main() -> Status {
                 MemoryType::LOADER_CODE => MemoryRegionType::BootloaderCode,
                 MemoryType::LOADER_DATA => MemoryRegionType::BootloaderData,
                 MemoryType::BOOT_SERVICES_CODE | MemoryType::BOOT_SERVICES_DATA => {
-                    MemoryRegionType::Usable
+                    MemoryRegionType::Reserved
                 }
                 MemoryType::RUNTIME_SERVICES_CODE | MemoryType::RUNTIME_SERVICES_DATA => {
                     MemoryRegionType::Reserved
@@ -379,7 +393,7 @@ fn main() -> Status {
             (*boot_info_ptr).memory_map.add_region(region);
         }
 
-        (*boot_info_ptr).rsdp_addr = None;
+        (*boot_info_ptr).rsdp_addr = rsdp_addr;
         (*boot_info_ptr).kernel_phys_base = kernel_phys_base;
         (*boot_info_ptr).kernel_virt_base = kernel_phys_base;
         (*boot_info_ptr).kernel_size = total_kernel_size as u64;

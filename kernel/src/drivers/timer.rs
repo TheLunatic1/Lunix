@@ -15,12 +15,24 @@ pub fn init() {
         // Channel 0, Access mode low/high byte, Rate Generator (mode 2), 16-bit binary
         outb(PIT_COMMAND_MODE, 0x34);
         outb(PIT_CHANNEL_0_DATA, (divisor & 0xFF) as u8);
-        outb(PIT_CHANNEL_0_DATA, ((divisor >> 8) & 0xFF) as u8);
     }
 }
 
 pub fn on_tick() {
-    TICKS.fetch_add(1, Ordering::Relaxed);
+    let core_id = crate::arch::x86_64::apic::lapic::id();
+    if core_id == 0 {
+        let tick = TICKS.fetch_add(1, Ordering::Relaxed);
+
+        // Fast hardware poll for COM1 UART serial input on BSP only
+        crate::arch::x86_64::serial::poll_hardware();
+
+        // Every 16ms (~60 FPS), render GUI frame if active
+        if tick % 16 == 0 {
+            crate::display::desktop::render_frame();
+        }
+    }
+
+    crate::task::scheduler::timer_tick();
 }
 
 pub fn get_ticks() -> u64 {
@@ -35,9 +47,29 @@ pub fn get_uptime_seconds() -> u64 {
     get_ticks() / 1000
 }
 
+#[inline(always)]
+pub fn io_delay() {
+    unsafe {
+        crate::arch::x86_64::io::inb(0x80);
+    }
+}
+
+pub fn busy_wait_ms(ms: u64) {
+    for _ in 0..ms {
+        for _ in 0..1000 {
+            io_delay();
+        }
+    }
+}
+
 pub fn sleep_ms(ms: u64) {
+    if !x86_64::instructions::interrupts::are_enabled() {
+        busy_wait_ms(ms);
+        return;
+    }
+
     let start = get_ticks();
-    while get_ticks() - start < ms {
+    while get_ticks().saturating_sub(start) < ms {
         x86_64::instructions::hlt();
     }
 }

@@ -1,6 +1,15 @@
 pub const FONT_WIDTH: usize = 8;
 pub const FONT_HEIGHT: usize = 16;
 
+pub fn get_glyph(c: char) -> &'static [u8; 16] {
+    let ascii = c as usize;
+    if (32..128).contains(&ascii) {
+        &FONT_BASIC[ascii - 32]
+    } else {
+        &FONT_BASIC[0]
+    }
+}
+
 // Standard IBM VGA 8x16 bitmap font covering ASCII 32..127
 pub static FONT_BASIC: [[u8; 16]; 96] = [
     // 32 ' '

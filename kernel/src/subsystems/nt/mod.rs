@@ -2,10 +2,11 @@ pub mod hal;
 pub mod ntoskrnl;
 pub mod pe;
 pub mod types;
+pub mod win32;
 
-use crate::subsystems::nt::types::*;
-use crate::{lunix_println, lunix_serial_println};
+use crate::lunix_println;
 use alloc::alloc::{alloc, Layout};
+use types::*;
 
 // -----------------------------------------------------------------------------
 // Sample Windows NT Driver (WDM) Demonstration running under Lunix

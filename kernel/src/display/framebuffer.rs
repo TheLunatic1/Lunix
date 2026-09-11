@@ -9,6 +9,14 @@ pub struct Color {
 }
 
 impl Color {
+    pub const fn rgb(r: u8, g: u8, b: u8) -> Self {
+        Self { r, g, b }
+    }
+
+    pub const fn to_u32(self) -> u32 {
+        (0xFF << 24) | ((self.r as u32) << 16) | ((self.g as u32) << 8) | (self.b as u32)
+    }
+
     pub const BLACK: Color = Color { r: 0, g: 0, b: 0 };
     pub const WHITE: Color = Color { r: 255, g: 255, b: 255 };
     pub const RED: Color = Color { r: 245, g: 70, b: 70 };
@@ -124,17 +132,26 @@ impl Framebuffer {
     }
 
     pub fn scroll_up(&mut self, rows: usize, bg: Color) {
-        let stride_bytes = self.info.stride * self.info.bytes_per_pixel;
-        let move_bytes = (self.info.height - rows) * stride_bytes;
+        self.scroll_region_up(0, self.info.height, rows, bg);
+    }
 
-        let src = (self.info.base_address + (rows * stride_bytes) as u64) as *const u64;
-        let dst = self.info.base_address as *mut u64;
-        let u64_count = move_bytes / 8;
-
-        unsafe {
-            core::ptr::copy(src, dst, u64_count);
+    pub fn scroll_region_up(&mut self, top: usize, bottom: usize, rows: usize, bg: Color) {
+        if top >= bottom || rows >= (bottom - top) {
+            self.draw_rect(0, top, self.info.width, bottom - top, bg);
+            return;
         }
 
-        self.draw_rect(0, self.info.height - rows, self.info.width, rows, bg);
+        let stride_bytes = self.info.stride * self.info.bytes_per_pixel;
+        let move_height = (bottom - top) - rows;
+        let move_bytes = move_height * stride_bytes;
+
+        let src = (self.info.base_address + ((top + rows) * stride_bytes) as u64) as *const u8;
+        let dst = (self.info.base_address + (top * stride_bytes) as u64) as *mut u8;
+
+        unsafe {
+            core::ptr::copy(src, dst, move_bytes);
+        }
+
+        self.draw_rect(0, bottom - rows, self.info.width, rows, bg);
     }
 }

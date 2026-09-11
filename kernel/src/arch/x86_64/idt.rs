@@ -1,5 +1,5 @@
 use core::cell::UnsafeCell;
-use crate::arch::x86_64::pic::{InterruptIndex, PICS};
+use crate::arch::x86_64::pic::InterruptIndex;
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode};
 
 struct SyncUnsafeCell<T>(UnsafeCell<T>);
@@ -35,8 +35,26 @@ pub fn init() {
         idt[InterruptIndex::Timer.as_u8()].set_handler_fn(timer_interrupt_handler);
         idt[InterruptIndex::Keyboard.as_u8()].set_handler_fn(keyboard_interrupt_handler);
 
+        // COM1 UART serial interrupt handler (IRQ4 -> 0x24)
+        idt[0x24].set_handler_fn(serial_interrupt_handler);
+
+        // APIC Spurious interrupt handler (0xFF)
+        idt[0xFF].set_handler_fn(spurious_interrupt_handler);
+
+        // PS/2 Mouse interrupt handler (IRQ12 -> 0x2C)
+        idt[0x2C].set_handler_fn(mouse_interrupt_handler);
+
+        // Storage primary/secondary IRQ handlers (IRQ14 / IRQ15)
+        idt[0x2E].set_handler_fn(storage_primary_interrupt_handler);
+        idt[0x2F].set_handler_fn(storage_secondary_interrupt_handler);
+
         idt.load();
     }
+}
+
+#[inline(always)]
+pub fn notify_eoi(_irq: u8) {
+    crate::arch::x86_64::apic::lapic::eoi();
 }
 
 extern "x86-interrupt" fn divide_error_handler(stack_frame: InterruptStackFrame) {
@@ -117,17 +135,32 @@ extern "x86-interrupt" fn double_fault_handler(
 
 extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFrame) {
     crate::drivers::timer::on_tick();
-    unsafe {
-        PICS.lock()
-            .notify_end_of_interrupt(InterruptIndex::Timer.as_u8());
-    }
+    notify_eoi(InterruptIndex::Timer.as_u8());
 }
-
 
 extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStackFrame) {
     crate::drivers::keyboard::on_interrupt();
-    unsafe {
-        PICS.lock()
-            .notify_end_of_interrupt(InterruptIndex::Keyboard.as_u8());
-    }
+    notify_eoi(InterruptIndex::Keyboard.as_u8());
+}
+
+extern "x86-interrupt" fn serial_interrupt_handler(_stack_frame: InterruptStackFrame) {
+    crate::arch::x86_64::serial::poll_hardware();
+    notify_eoi(0x24);
+}
+
+extern "x86-interrupt" fn spurious_interrupt_handler(_stack_frame: InterruptStackFrame) {
+    // Spurious interrupt: no EOI per Intel architecture specification
+}
+
+extern "x86-interrupt" fn mouse_interrupt_handler(_stack_frame: InterruptStackFrame) {
+    crate::drivers::mouse::on_interrupt();
+    notify_eoi(0x2C);
+}
+
+extern "x86-interrupt" fn storage_primary_interrupt_handler(_stack_frame: InterruptStackFrame) {
+    notify_eoi(0x2E);
+}
+
+extern "x86-interrupt" fn storage_secondary_interrupt_handler(_stack_frame: InterruptStackFrame) {
+    notify_eoi(0x2F);
 }

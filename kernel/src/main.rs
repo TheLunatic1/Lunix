@@ -12,8 +12,13 @@ pub mod arch;
 #[macro_use]
 pub mod display;
 pub mod drivers;
+pub mod fs;
 pub mod mm;
+pub mod net;
 pub mod subsystems;
+pub mod sync;
+pub mod syscall;
+pub mod task;
 
 use core::panic::PanicInfo;
 use lunix_common::BootInfo;
@@ -64,44 +69,56 @@ pub extern "sysv64" fn kmain(boot_info: &'static BootInfo) -> ! {
     lunix_println!(" [+] Lunix Kernel v0.1.0 Initializing in 64-bit Long Mode...");
 
     // 3. Initialize CPU Descriptors (GDT, TSS, IDT, PIC)
-    lunix_serial_println!("[kmain] Initializing GDT...");
     arch::x86_64::gdt::init();
-
-    lunix_serial_println!("[kmain] Initializing IDT...");
     arch::x86_64::idt::init();
-
-    lunix_serial_println!("[kmain] Initializing PIC...");
     arch::x86_64::pic::init();
-
     lunix_println!("[+] Initialized CPU Tables (GDT, TSS, IDT, PIC).");
 
     // 4. Initialize Memory Subsystem (PMM, VMM, Heap)
-    arch::x86_64::serial::write_str("[kmain] Step 4 reached\n");
-    lunix_serial_println!("[kmain] Initializing Memory Subsystem...");
-    arch::x86_64::serial::write_str("[kmain] Calling mm::init\n");
     mm::init(boot_info);
-    arch::x86_64::serial::write_str("[kmain] mm::init returned\n");
+    lunix_println!("[+] Memory Management Subsystem ready (PMM, VMM, 16MB Heap).");
 
-    arch::x86_64::serial::write_str("[kmain] Step 5: Drivers init\n");
+    // 5. Initialize ACPI & Modern APIC / SMP Multi-Core
+    arch::x86_64::acpi::init(boot_info);
+    arch::x86_64::apic::init();
+    arch::x86_64::smp::init();
+
+    let total_cores = arch::x86_64::smp::CPU_COUNT.load(core::sync::atomic::Ordering::SeqCst);
+    lunix_println!("[+] ACPI 2.0 & APIC configured. Multi-Core Active: {} Core(s).", total_cores);
+
+    // 6. Initialize Hardware Drivers (Keyboard, PCI, Storage)
     drivers::init();
-    arch::x86_64::serial::write_str("[kmain] Drivers init done\n");
+    lunix_println!("[+] Hardware Drivers initialized (PCI, PIT/APIC Timer, PS/2 Keyboard, Storage).");
 
-    arch::x86_64::serial::write_str("[kmain] Step 6: Subsystems init\n");
+    // 7. Initialize VFS and Mount Root Filesystem
+    fs::init();
+
+    // 8. Initialize Network Protocol Stack (TCP/IP)
+    net::init();
+
+    // 8. Initialize Windows NT Driver Compatibility Subsystem
     subsystems::init();
-    arch::x86_64::serial::write_str("[kmain] Subsystems init done\n");
+    lunix_println!("[+] Windows NT Subsystem (WDM / extern \"win64\" ABI) ready.");
 
-    arch::x86_64::serial::write_str("[kmain] Step 7: Enabling Interrupts\n");
+    // 9. Initialize Preemptive Multitasking & Task Scheduler
+    task::init();
+    lunix_println!("[+] Preemptive Multitasking & Priority Scheduler active.");
+
+    // 10. Initialize Fast MSR Syscall & Ring 3 ABI
+    arch::x86_64::syscall::init();
+    lunix_println!("[+] Fast MSR Syscall & Ring 3 User Space ABI ready.");
+
+    // 11. Enable interrupts
     x86_64::instructions::interrupts::enable();
-    arch::x86_64::serial::write_str("[kmain] Interrupts enabled!\n");
+    lunix_serial_println!("[kmain] Hardware Interrupts enabled.");
 
     lunix_println!("");
     lunix_println!("===============================================================");
-    lunix_println!("  LUNIX READY. Type on your keyboard to test input interactivity!");
+    lunix_println!("  LUNIX READY. Type on your keyboard or explore with 'help'!");
     lunix_println!("===============================================================");
-    lunix_print!("lunix> ");
-
-    arch::x86_64::serial::write_str("[kmain] Entering HLT loop\n");
-    arch::x86_64::hlt_loop()
+    drivers::keyboard::print_prompt();
+    // Run interactive shell loop on BSP kernel main thread (TID 0) with interrupts enabled
+    drivers::keyboard::run_shell_loop()
 }
 
 #[panic_handler]

@@ -1,4 +1,3 @@
-use crate::lunix_serial_println;
 use crate::subsystems::nt::types::*;
 use alloc::alloc::{alloc, Layout};
 

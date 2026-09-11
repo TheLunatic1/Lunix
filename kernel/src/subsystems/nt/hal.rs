@@ -1,6 +1,5 @@
 use crate::arch::x86_64::io::{inb, inl, inw, outb, outl, outw};
 use crate::drivers::pci;
-use crate::lunix_serial_println;
 use crate::subsystems::nt::types::ULONG;
 use core::ffi::c_void;
 
