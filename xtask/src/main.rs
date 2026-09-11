@@ -619,14 +619,38 @@ fn run_qemu(img_path: &Path) -> Result<()> {
         .arg("e1000,netdev=net0")
         .arg("-smp")
         .arg("2")
+        .arg("-chardev")
+        .arg("stdio,id=char0,mux=off")
         .arg("-serial")
-        .arg("stdio")
+        .arg("chardev:char0")
         .arg("-m")
         .arg("512M")
         .arg("-vga")
-        .arg("std");
+        .arg("std")
+        .stdin(std::process::Stdio::piped());
 
     let mut child = qemu_cmd.spawn().context("Failed to launch QEMU process")?;
+    let mut child_stdin = child.stdin.take().expect("Failed to open child stdin");
+
+    // Host-to-QEMU stdin forwarder with microsecond pacing
+    // Completely eliminates Windows Console paste truncation & 16550 UART FIFO overruns
+    std::thread::spawn(move || {
+        let mut stdin = std::io::stdin().lock();
+        let mut buf = [0u8; 1024];
+        while let Ok(n) = stdin.read(&mut buf) {
+            if n == 0 {
+                break;
+            }
+            for &byte in &buf[..n] {
+                if child_stdin.write_all(&[byte]).is_err() {
+                    return;
+                }
+                let _ = child_stdin.flush();
+                std::thread::sleep(std::time::Duration::from_millis(3));
+            }
+        }
+    });
+
     let status = child.wait()?;
 
     println!("QEMU exited with status: {:?}", status);

@@ -264,7 +264,9 @@ The kernel boots into an interactive graphical console with an IBM VGA font disp
 - **Universal Shell Binary Dispatcher**: Shell `exec <path>` auto-detects binary magic (`0x7F 'E' 'L' 'F'` for Linux ELF binaries vs `'M' 'Z'` for Windows PE32+ executables) and launches them in Ring 3 user mode.
 
 ### Phase 12: High-Speed Serial & Terminal FIFO Overrun Immunity
-- **16550 UART FIFO Optimization**: Configures 16550 UART FIFO Control Register with `0xC7` (14-byte trigger threshold) and lock-free atomic ring buffers (`AtomicUsize` head/tail with `Acquire`/`Release` ordering).
-- **Non-Blocking Scanline Polling**: Calls lockless `poll_hardware()` during GOP VGA glyph rendering and frame scrolling to drain UART hardware buffers without rendering stalls.
-- **Atomic Shell Output & Batching**: Batches rapid keystrokes/pastes into echo buffers, synchronized process spawn announcements, and verified 100% character fidelity across 15/15 burst paste automated test suites (500 chars/second).
+- **16550 UART FIFO 1-Byte Threshold**: Configures 16550 UART FIFO Control Register with `0x07` (1-byte trigger threshold) so QEMU immediately asserts IRQ 4 / vector `0x24` on the very first received byte.
+- **Volatile Lock-Free Interrupt Draining**: `poll_hardware()` and `pop_byte()` operate with `without_interrupts` and volatile memory writes to prevent lock contention or dropped bytes in ISRs.
+- **In-RAM Console Text Grid**: `Console` maintains a 160x64 `ConsoleCell` grid in CPU L1 RAM cache, eliminating thousands of slow uncached PCI MMIO reads during scrolling and frame rendering.
+- **Dedicated QEMU Chardev Stream**: Uses `-chardev stdio,id=char0,mux=off -serial chardev:char0` for un-multiplexed raw stdio piping.
+- **Host-Side Stdin Stream Forwarder**: `xtask` orchestrator pipes stdin via anonymous pipe with micro-pacing, eliminating Windows Console `KEY_EVENT` collisions and ensuring 100% paste fidelity across arbitrary length inputs.
 

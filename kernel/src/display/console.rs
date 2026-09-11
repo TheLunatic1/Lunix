@@ -4,6 +4,26 @@ use core::fmt;
 use lunix_common::FramebufferInfo;
 use spin::Mutex;
 
+const MAX_COLS: usize = 160;
+const MAX_ROWS: usize = 64;
+
+#[derive(Clone, Copy)]
+pub struct ConsoleCell {
+    pub c: char,
+    pub fg: Color,
+    pub bg: Color,
+}
+
+impl ConsoleCell {
+    pub const fn empty(bg: Color) -> Self {
+        Self {
+            c: ' ',
+            fg: Color::WHITE,
+            bg,
+        }
+    }
+}
+
 pub struct Console {
     pub framebuffer: Framebuffer,
     pub cursor_x: usize,
@@ -14,6 +34,7 @@ pub struct Console {
     pub margin_top: usize,
     pub rows: usize,
     pub cols: usize,
+    pub cells: [[ConsoleCell; MAX_COLS]; MAX_ROWS],
 }
 
 impl Console {
@@ -23,8 +44,8 @@ impl Console {
 
         let margin_left = 20;
         let margin_top = 40;
-        let cols = (info.width - margin_left * 2) / FONT_WIDTH;
-        let rows = (info.height - margin_top - 20) / FONT_HEIGHT;
+        let cols = ((info.width - margin_left * 2) / FONT_WIDTH).min(MAX_COLS);
+        let rows = ((info.height - margin_top - 20) / FONT_HEIGHT).min(MAX_ROWS);
 
         let mut console = Self {
             framebuffer: fb,
@@ -36,6 +57,7 @@ impl Console {
             margin_top,
             rows,
             cols,
+            cells: [[ConsoleCell::empty(Color::DARK_BLUE); MAX_COLS]; MAX_ROWS],
         };
 
         console.draw_header();
@@ -75,6 +97,7 @@ impl Console {
                     self.cursor_x -= 1;
                     let x = self.margin_left + self.cursor_x * FONT_WIDTH;
                     let y = self.margin_top + self.cursor_y * FONT_HEIGHT;
+                    self.cells[self.cursor_y][self.cursor_x] = ConsoleCell::empty(self.bg_color);
                     self.framebuffer.draw_char(x, y, ' ', self.fg_color, self.bg_color);
                 }
             }
@@ -85,6 +108,11 @@ impl Console {
 
                 let x = self.margin_left + self.cursor_x * FONT_WIDTH;
                 let y = self.margin_top + self.cursor_y * FONT_HEIGHT;
+                self.cells[self.cursor_y][self.cursor_x] = ConsoleCell {
+                    c: ch,
+                    fg: self.fg_color,
+                    bg: self.bg_color,
+                };
                 self.framebuffer.draw_char(x, y, ch, self.fg_color, self.bg_color);
                 self.cursor_x += 1;
             }
@@ -104,9 +132,20 @@ impl Console {
         if self.cursor_y + 1 < self.rows {
             self.cursor_y += 1;
         } else {
-            // Scroll text region up while keeping top header intact
-            let bottom = self.margin_top + self.rows * FONT_HEIGHT;
-            self.framebuffer.scroll_region_up(self.margin_top, bottom, FONT_HEIGHT, self.bg_color);
+            // Scroll text region up in RAM cells and redraw smoothly from memory
+            for row in 0..self.rows - 1 {
+                self.cells[row] = self.cells[row + 1];
+            }
+            self.cells[self.rows - 1] = [ConsoleCell::empty(self.bg_color); MAX_COLS];
+
+            for row in 0..self.rows {
+                let y = self.margin_top + row * FONT_HEIGHT;
+                for col in 0..self.cols {
+                    let cell = self.cells[row][col];
+                    let x = self.margin_left + col * FONT_WIDTH;
+                    self.framebuffer.draw_char(x, y, cell.c, cell.fg, cell.bg);
+                }
+            }
         }
     }
 

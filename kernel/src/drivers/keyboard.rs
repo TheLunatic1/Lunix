@@ -92,6 +92,7 @@ pub enum ExecResult {
 }
 
 pub fn print_prompt() {
+    LAST_WAS_CR.store(false, core::sync::atomic::Ordering::Relaxed);
     let cwd = get_cwd();
     if cwd == "/" {
         lunix_print!("lunix> ");
@@ -594,6 +595,7 @@ pub fn handle_chars(chars: &[char]) {
     for &ch in chars {
         match ch {
             '\r' | '\n' => {
+                LAST_WAS_CR.store(false, core::sync::atomic::Ordering::Relaxed);
                 if !echo_buf.is_empty() {
                     lunix_print!("{}", echo_buf);
                     echo_buf.clear();

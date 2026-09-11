@@ -8,7 +8,6 @@ static RX_HEAD: AtomicUsize = AtomicUsize::new(0);
 static RX_TAIL: AtomicUsize = AtomicUsize::new(0);
 
 static SERIAL_PORT_LOCK: Mutex<()> = Mutex::new(());
-static POLL_LOCK: Mutex<()> = Mutex::new(());
 
 pub fn init() {
     let iir = x86_64::instructions::interrupts::without_interrupts(|| {
@@ -45,9 +44,8 @@ pub fn init() {
     write_str(")\n");
 }
 
-#[inline(always)]
 pub fn poll_hardware() {
-    if let Some(_guard) = POLL_LOCK.try_lock() {
+    x86_64::instructions::interrupts::without_interrupts(|| {
         unsafe {
             while (crate::arch::x86_64::io::inb(0x3FD) & 1) != 0 {
                 let byte = crate::arch::x86_64::io::inb(0x3F8);
@@ -55,12 +53,12 @@ pub fn poll_hardware() {
                 let next_head = (head + 1) % RX_BUFFER_SIZE;
                 let tail = RX_TAIL.load(Ordering::Acquire);
                 if next_head != tail {
-                    RX_BUFFER[head] = byte;
+                    core::ptr::write_volatile(&mut RX_BUFFER[head], byte);
                     RX_HEAD.store(next_head, Ordering::Release);
                 }
             }
         }
-    }
+    });
 }
 
 #[inline(always)]
@@ -68,7 +66,7 @@ pub fn pop_byte() -> Option<u8> {
     let tail = RX_TAIL.load(Ordering::Acquire);
     let head = RX_HEAD.load(Ordering::Acquire);
     if tail != head {
-        let b = unsafe { RX_BUFFER[tail] };
+        let b = unsafe { core::ptr::read_volatile(&RX_BUFFER[tail]) };
         RX_TAIL.store((tail + 1) % RX_BUFFER_SIZE, Ordering::Release);
         Some(b)
     } else {
