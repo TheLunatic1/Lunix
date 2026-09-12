@@ -97,8 +97,8 @@ pub fn parse_directory(data: &[u8]) -> Vec<ParsedFatEntry> {
         let raw = unsafe { &*(data[offset..].as_ptr() as *const RawDirEntry) };
 
         let name = if !lfn_parts.is_empty() {
-            // Assemble LFN in reverse sequence order
-            lfn_parts.sort_by(|a, b| b.0.cmp(&a.0));
+            // Assemble LFN in sequence order (1, 2, 3...)
+            lfn_parts.sort_by(|a, b| a.0.cmp(&b.0));
             let mut full_name = String::new();
             for (_, part) in lfn_parts.iter() {
                 full_name.push_str(part);
