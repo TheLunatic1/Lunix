@@ -1,10 +1,11 @@
 //! Win32 User-Mode Subsystem for Lunix OS
 //!
 //! Provides PE32+ Windows 64-bit executable loader, IAT resolution for kernel32.dll / ntdll.dll,
-//! Win32 API shims, and user-mode execution via extern "win64" ABI.
+//! Win32 API shims, anonymous pipes, file streaming, directory searching, and user-mode execution via extern "win64" ABI.
 
 use alloc::string::String;
-use core::sync::atomic::Ordering;
+use alloc::vec::Vec;
+use core::sync::atomic::{AtomicUsize, Ordering};
 use spin::Mutex;
 use x86_64::VirtAddr;
 
@@ -20,6 +21,28 @@ use crate::{lunix_print, lunix_println};
 pub const STD_INPUT_HANDLE: i32 = -10;
 pub const STD_OUTPUT_HANDLE: i32 = -11;
 pub const STD_ERROR_HANDLE: i32 = -12;
+
+// Win32 File Attributes
+pub const FILE_ATTRIBUTE_READONLY: u32 = 0x01;
+pub const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
+pub const FILE_ATTRIBUTE_ARCHIVE: u32 = 0x20;
+pub const FILE_ATTRIBUTE_NORMAL: u32 = 0x80;
+
+// Win32 Find Data
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct Win32FindDataA {
+    pub dw_file_attributes: u32,
+    pub ft_creation_time: [u32; 2],
+    pub ft_last_access_time: [u32; 2],
+    pub ft_last_write_time: [u32; 2],
+    pub n_file_size_high: u32,
+    pub n_file_size_low: u32,
+    pub dw_reserved0: u32,
+    pub dw_reserved1: u32,
+    pub c_file_name: [u8; 260],
+    pub c_alternate_file_name: [u8; 14],
+}
 
 // Win32 System Info
 #[repr(C)]
@@ -68,8 +91,16 @@ pub struct StartupInfoA {
     pub h_std_error: u64,
 }
 
+struct Win32FindSearch {
+    id: usize,
+    entries: Vec<crate::fs::file::DirectoryEntry>,
+    current_idx: usize,
+}
+
 static WIN32_USER_HEAP: Mutex<u64> = Mutex::new(0x0000_7000_0000_0000);
 static WIN32_CMDLINE: Mutex<String> = Mutex::new(String::new());
+static WIN32_SEARCHES: Mutex<Vec<Win32FindSearch>> = Mutex::new(Vec::new());
+static NEXT_SEARCH_ID: AtomicUsize = AtomicUsize::new(0x3000);
 
 // Win32 VDSO User-Mode Thunk Base (Ring 3 accessible)
 pub const WIN32_VDSO_BASE: u64 = 0x0000_7FFF_1000_0000;
@@ -94,6 +125,13 @@ pub const THUNK_CREATE_PROCESS_A: usize = 16 * 32;
 pub const THUNK_WAIT_FOR_SINGLE_OBJECT: usize = 17 * 32;
 pub const THUNK_GET_EXIT_CODE_PROCESS: usize = 18 * 32;
 pub const THUNK_VIRTUAL_PROTECT: usize = 19 * 32;
+pub const THUNK_CREATE_PIPE: usize = 20 * 32;
+pub const THUNK_SET_STD_HANDLE: usize = 21 * 32;
+pub const THUNK_CREATE_FILE_A: usize = 22 * 32;
+pub const THUNK_CLOSE_HANDLE: usize = 23 * 32;
+pub const THUNK_FIND_FIRST_FILE_A: usize = 24 * 32;
+pub const THUNK_FIND_NEXT_FILE_A: usize = 25 * 32;
+pub const THUNK_FIND_CLOSE: usize = 26 * 32;
 
 fn emit_win32_thunk(buf: &mut [u8; 4096], offset: usize, syscall_id: u32) {
     // Generates a 64-bit user-mode thunk stub translating Win64 calling convention to Syscall ABI:
@@ -161,23 +199,42 @@ pub fn sys_win32_write_console(
     1 // TRUE
 }
 
+pub fn sys_win32_write_file(
+    h_file: u64,
+    lp_buffer: *const u8,
+    n_bytes_to_write: u32,
+    lp_bytes_written: *mut u32,
+) -> u32 {
+    let res = crate::syscall::sys_write(h_file as usize, lp_buffer, n_bytes_to_write as usize);
+    if res >= 0 {
+        if !lp_bytes_written.is_null() {
+            unsafe {
+                *lp_bytes_written = res as u32;
+            }
+        }
+        1 // TRUE
+    } else {
+        0 // FALSE
+    }
+}
+
 pub fn sys_win32_read_file(
-    _h_file: u64,
+    h_file: u64,
     lp_buffer: *mut u8,
     n_bytes_to_read: u32,
     lp_bytes_read: *mut u32,
 ) -> u32 {
-    if !lp_buffer.is_null() && n_bytes_to_read > 0 {
-        unsafe {
-            *lp_buffer = 0;
+    let res = crate::syscall::sys_read(h_file as usize, lp_buffer, n_bytes_to_read as usize);
+    if res >= 0 {
+        if !lp_bytes_read.is_null() {
+            unsafe {
+                *lp_bytes_read = res as u32;
+            }
         }
+        1 // TRUE
+    } else {
+        0 // FALSE
     }
-    if !lp_bytes_read.is_null() {
-        unsafe {
-            *lp_bytes_read = 0;
-        }
-    }
-    1
 }
 
 pub fn sys_win32_exit_process(exit_code: u32) -> ! {
@@ -254,7 +311,6 @@ pub fn sys_win32_get_command_line() -> u64 {
     cmd.as_ptr() as u64
 }
 
-
 pub fn sys_win32_create_process(
     lp_app_name: *const u8,
     lp_cmd_line: *const u8,
@@ -299,7 +355,6 @@ pub fn sys_win32_create_process(
 
 pub fn sys_win32_wait_for_single_object(h_handle: u64, _dw_milliseconds: u32) -> u32 {
     let target_tid = h_handle as usize;
-    // Loop until thread terminates or is dead
     for _ in 0..100 {
         let is_dead = {
             let threads = scheduler::list_threads();
@@ -350,6 +405,220 @@ pub fn sys_win32_virtual_protect(
     1 // TRUE
 }
 
+pub fn sys_win32_create_pipe(
+    ph_read_pipe: *mut u64,
+    ph_write_pipe: *mut u64,
+    _lp_pipe_attributes: *const u8,
+    _n_size: u32,
+) -> u32 {
+    if ph_read_pipe.is_null() || ph_write_pipe.is_null() {
+        return 0; // FALSE
+    }
+    let (reader, writer) = crate::task::pipe::create_pipe_pair();
+    if let Some(proc_arc) = scheduler::get_current_process() {
+        let mut proc = proc_arc.lock();
+        if let Some(read_fd) = proc.allocate_fd(crate::task::process::FileDescriptor {
+            target: crate::task::process::FdTarget::PipeRead(reader),
+            flags: 0,
+        }) {
+            if let Some(write_fd) = proc.allocate_fd(crate::task::process::FileDescriptor {
+                target: crate::task::process::FdTarget::PipeWrite(writer),
+                flags: 0,
+            }) {
+                unsafe {
+                    *ph_read_pipe = read_fd as u64;
+                    *ph_write_pipe = write_fd as u64;
+                }
+                return 1; // TRUE
+            } else {
+                proc.close_fd(read_fd);
+            }
+        }
+    }
+    0 // FALSE
+}
+
+pub fn sys_win32_set_std_handle(n_std_handle: i32, h_handle: u64) -> u32 {
+    let target_fd = match n_std_handle {
+        STD_INPUT_HANDLE => 0,
+        STD_OUTPUT_HANDLE => 1,
+        STD_ERROR_HANDLE => 2,
+        _ => return 0,
+    };
+    if let Some(proc_arc) = scheduler::get_current_process() {
+        let mut proc = proc_arc.lock();
+        if proc.dup_fd(h_handle as usize, target_fd).is_some() {
+            return 1; // TRUE
+        }
+    }
+    0
+}
+
+pub fn sys_win32_create_file(
+    lp_file_name: *const u8,
+    _dw_desired_access: u32,
+    _dw_share_mode: u32,
+    _lp_sec: *const u8,
+    _dw_disp: u32,
+) -> u64 {
+    if lp_file_name.is_null() {
+        return u64::MAX;
+    }
+    let mut len = 0;
+    unsafe {
+        while *lp_file_name.add(len) != 0 && len < 256 {
+            len += 1;
+        }
+    }
+    let slice = unsafe { core::slice::from_raw_parts(lp_file_name, len) };
+    if let Ok(path) = core::str::from_utf8(slice) {
+        if let Some(proc_arc) = scheduler::get_current_process() {
+            let mut proc = proc_arc.lock();
+            if let Ok(data) = vfs::read_to_vec(path) {
+                let size = data.len();
+                if let Some(fd) = proc.allocate_fd(crate::task::process::FileDescriptor {
+                    target: crate::task::process::FdTarget::File {
+                        path: alloc::string::String::from(path),
+                        offset: 0,
+                        size,
+                        data,
+                    },
+                    flags: 0,
+                }) {
+                    return fd as u64;
+                }
+            }
+        }
+    }
+    u64::MAX // INVALID_HANDLE_VALUE
+}
+
+pub fn sys_win32_close_handle(h_object: u64) -> u32 {
+    let fd = h_object as usize;
+    if let Some(proc_arc) = scheduler::get_current_process() {
+        let mut proc = proc_arc.lock();
+        if proc.close_fd(fd) {
+            return 1; // TRUE
+        }
+    }
+    if sys_win32_find_close(h_object) == 1 {
+        return 1;
+    }
+    0 // FALSE
+}
+
+fn sanitize_find_path(raw: &str) -> &str {
+    let p = raw.trim();
+    if p == "*" || p == "*.*" || p == "/*" || p == "/*.*" {
+        return "/";
+    }
+    let p = p.strip_suffix("/*.*").unwrap_or(p);
+    let p = p.strip_suffix("/*").unwrap_or(p);
+    let p = p.strip_suffix("\\*.*").unwrap_or(p);
+    let p = p.strip_suffix("\\*").unwrap_or(p);
+    if p.is_empty() {
+        "/"
+    } else {
+        p
+    }
+}
+
+pub fn sys_win32_find_first_file(
+    lp_file_name: *const u8,
+    lp_find_data: *mut Win32FindDataA,
+) -> u64 {
+    if lp_file_name.is_null() || lp_find_data.is_null() {
+        return u64::MAX;
+    }
+
+    let mut len = 0;
+    unsafe {
+        while *lp_file_name.add(len) != 0 && len < 256 {
+            len += 1;
+        }
+    }
+    let slice = unsafe { core::slice::from_raw_parts(lp_file_name, len) };
+    let raw_path = match core::str::from_utf8(slice) {
+        Ok(s) => s,
+        Err(_) => return u64::MAX,
+    };
+
+    let search_path = sanitize_find_path(raw_path);
+    let entries = match vfs::read_dir(search_path) {
+        Ok(e) => e,
+        Err(_) => return u64::MAX,
+    };
+
+    if entries.is_empty() {
+        return u64::MAX;
+    }
+
+    let first = &entries[0];
+    unsafe {
+        fill_find_data(lp_find_data, first);
+    }
+
+    let search_id = NEXT_SEARCH_ID.fetch_add(1, Ordering::SeqCst);
+    let mut searches = WIN32_SEARCHES.lock();
+    searches.push(Win32FindSearch {
+        id: search_id,
+        entries,
+        current_idx: 1,
+    });
+
+    search_id as u64
+}
+
+pub fn sys_win32_find_next_file(h_find_file: u64, lp_find_data: *mut Win32FindDataA) -> u32 {
+    if lp_find_data.is_null() {
+        return 0; // FALSE
+    }
+
+    let search_id = h_find_file as usize;
+    let mut searches = WIN32_SEARCHES.lock();
+    if let Some(search) = searches.iter_mut().find(|s| s.id == search_id) {
+        if search.current_idx < search.entries.len() {
+            let entry = &search.entries[search.current_idx];
+            unsafe {
+                fill_find_data(lp_find_data, entry);
+            }
+            search.current_idx += 1;
+            1 // TRUE
+        } else {
+            0 // FALSE (no more files)
+        }
+    } else {
+        0 // FALSE
+    }
+}
+
+pub fn sys_win32_find_close(h_find_file: u64) -> u32 {
+    let search_id = h_find_file as usize;
+    let mut searches = WIN32_SEARCHES.lock();
+    if let Some(pos) = searches.iter().position(|s| s.id == search_id) {
+        searches.swap_remove(pos);
+        1 // TRUE
+    } else {
+        0 // FALSE
+    }
+}
+
+unsafe fn fill_find_data(dest: *mut Win32FindDataA, entry: &crate::fs::file::DirectoryEntry) {
+    let data = &mut *dest;
+    core::ptr::write_bytes(dest as *mut u8, 0, core::mem::size_of::<Win32FindDataA>());
+    data.dw_file_attributes = if entry.node_type == crate::fs::inode::INodeType::Directory {
+        FILE_ATTRIBUTE_DIRECTORY
+    } else {
+        FILE_ATTRIBUTE_NORMAL
+    };
+    data.n_file_size_low = (entry.size & 0xFFFF_FFFF) as u32;
+    data.n_file_size_high = ((entry.size >> 32) & 0xFFFF_FFFF) as u32;
+    let name_bytes = entry.name.as_bytes();
+    let copy_len = name_bytes.len().min(259);
+    core::ptr::copy_nonoverlapping(name_bytes.as_ptr(), data.c_file_name.as_mut_ptr(), copy_len);
+    data.c_file_name[copy_len] = 0;
+}
+
 // -----------------------------------------------------------------------------
 // Win32 Symbol Resolver (maps imports to user-mode VDSO thunk entry points)
 // -----------------------------------------------------------------------------
@@ -359,7 +628,9 @@ pub fn resolve_win32_symbol(dll: &str, symbol: &str) -> Option<usize> {
         || dll.eq_ignore_ascii_case("kernel32")
         || dll.eq_ignore_ascii_case("api-ms-win-core-processenvironment-l1-1-0.dll")
         || dll.eq_ignore_ascii_case("api-ms-win-core-processthreads-l1-1-0.dll")
-        || dll.eq_ignore_ascii_case("api-ms-win-core-memory-l1-1-0.dll");
+        || dll.eq_ignore_ascii_case("api-ms-win-core-memory-l1-1-0.dll")
+        || dll.eq_ignore_ascii_case("api-ms-win-core-file-l1-1-0.dll")
+        || dll.eq_ignore_ascii_case("api-ms-win-core-handle-l1-1-0.dll");
 
     let is_ntdll = dll.eq_ignore_ascii_case("ntdll.dll") || dll.eq_ignore_ascii_case("ntdll");
 
@@ -385,6 +656,13 @@ pub fn resolve_win32_symbol(dll: &str, symbol: &str) -> Option<usize> {
             "CreateProcessA" => Some((WIN32_VDSO_BASE as usize) + THUNK_CREATE_PROCESS_A),
             "WaitForSingleObject" => Some((WIN32_VDSO_BASE as usize) + THUNK_WAIT_FOR_SINGLE_OBJECT),
             "GetExitCodeProcess" => Some((WIN32_VDSO_BASE as usize) + THUNK_GET_EXIT_CODE_PROCESS),
+            "CreatePipe" => Some((WIN32_VDSO_BASE as usize) + THUNK_CREATE_PIPE),
+            "SetStdHandle" => Some((WIN32_VDSO_BASE as usize) + THUNK_SET_STD_HANDLE),
+            "CreateFileA" | "CreateFileW" => Some((WIN32_VDSO_BASE as usize) + THUNK_CREATE_FILE_A),
+            "CloseHandle" => Some((WIN32_VDSO_BASE as usize) + THUNK_CLOSE_HANDLE),
+            "FindFirstFileA" | "FindFirstFileExA" => Some((WIN32_VDSO_BASE as usize) + THUNK_FIND_FIRST_FILE_A),
+            "FindNextFileA" => Some((WIN32_VDSO_BASE as usize) + THUNK_FIND_NEXT_FILE_A),
+            "FindClose" => Some((WIN32_VDSO_BASE as usize) + THUNK_FIND_CLOSE),
             "RtlAllocateHeap" => Some((WIN32_VDSO_BASE as usize) + THUNK_HEAP_ALLOC),
             "RtlFreeHeap" => Some((WIN32_VDSO_BASE as usize) + THUNK_HEAP_FREE),
             "RtlExitUserProcess" => Some((WIN32_VDSO_BASE as usize) + THUNK_EXIT_PROCESS),
@@ -581,6 +859,13 @@ pub fn load_win32_exe(data: &[u8]) -> Result<Win32Process, &'static str> {
         emit_win32_thunk(&mut vdso_buf, THUNK_WAIT_FOR_SINGLE_OBJECT, 0x1011);
         emit_win32_thunk(&mut vdso_buf, THUNK_GET_EXIT_CODE_PROCESS, 0x1012);
         emit_win32_thunk(&mut vdso_buf, THUNK_VIRTUAL_PROTECT, 0x1013);
+        emit_win32_thunk(&mut vdso_buf, THUNK_CREATE_PIPE, 0x1014);
+        emit_win32_thunk(&mut vdso_buf, THUNK_SET_STD_HANDLE, 0x1015);
+        emit_win32_thunk(&mut vdso_buf, THUNK_CREATE_FILE_A, 0x1016);
+        emit_win32_thunk(&mut vdso_buf, THUNK_CLOSE_HANDLE, 0x1017);
+        emit_win32_thunk(&mut vdso_buf, THUNK_FIND_FIRST_FILE_A, 0x1018);
+        emit_win32_thunk(&mut vdso_buf, THUNK_FIND_NEXT_FILE_A, 0x1019);
+        emit_win32_thunk(&mut vdso_buf, THUNK_FIND_CLOSE, 0x101A);
 
         unsafe {
             core::ptr::copy_nonoverlapping(
@@ -633,7 +918,10 @@ pub fn load_win32_exe(data: &[u8]) -> Result<Win32Process, &'static str> {
                         let func_name = core::str::from_utf8(core::slice::from_raw_parts(func_name_ptr, func_len)).unwrap_or("");
 
                         if let Some(resolved_addr) = resolve_win32_symbol(dll_name, func_name) {
+                            lunix_serial_println!("  [WIN32_IAT] {}!{} -> 0x{:X} at {:p}", dll_name, func_name, resolved_addr, iat_ptr);
                             *iat_ptr = resolved_addr;
+                        } else {
+                            lunix_serial_println!("  [WIN32_IAT] UNRESOLVED: {}!{} at {:p}", dll_name, func_name, iat_ptr);
                         }
                     }
 
@@ -646,9 +934,10 @@ pub fn load_win32_exe(data: &[u8]) -> Result<Win32Process, &'static str> {
         }
     }
 
-    // Allocate 64 KiB user stack
+    // Allocate 128 KiB user stack
     let user_stack_base = 0x0000_7FFF_2000_0000u64;
-    for p in 0..16 {
+    let stack_pages = 32;
+    for p in 0..stack_pages {
         let vaddr = VirtAddr::new(user_stack_base + (p * 4096));
         if let Some(frame) = pmm::alloc_frame() {
             let flags = x86_64::structures::paging::PageTableFlags::PRESENT
@@ -661,7 +950,7 @@ pub fn load_win32_exe(data: &[u8]) -> Result<Win32Process, &'static str> {
         }
     }
 
-    let stack_top = user_stack_base + (16 * 4096) - 128; // Shadow space alignment
+    let stack_top = user_stack_base + (stack_pages * 4096) - 512; // Shadow space & alignment
     let entry_point = base_vaddr + opt_header.address_of_entry_point as u64;
 
     Ok(Win32Process {
@@ -703,4 +992,3 @@ pub fn exec_win32_pe(path: &str) -> Result<usize, &'static str> {
     let tid = scheduler::spawn_with_pid("win32_app", pid, win32_runner_trampoline, 6);
     Ok(tid)
 }
-

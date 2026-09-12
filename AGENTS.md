@@ -278,4 +278,12 @@ The kernel boots into an interactive graphical console with an IBM VGA font disp
 - **Child Reaping (`wait4`)**: `sys_wait4` (61) blocks parent process until target child terminates, extracting exit status code (`WEXITSTATUS`).
 - **Win32 Process Model**: Implements `CreateProcessA` (0x1010), `WaitForSingleObject` (0x1011), `GetExitCodeProcess` (0x1012), and `VirtualProtect` (0x1013) user-mode VDSO thunks and kernel shims.
 
+### Phase 14: Milestone 2 — Streams, Pipes & Directory Navigation
+- **Kernel IPC Pipes**: Dedicated circular `PipeBuffer` with atomic reader/writer tracking, non-blocking support, and preemptive sleep yielding. Integrated into `Process::fds` as `FdTarget::Pipe`.
+- **Stream Syscalls**: Implements `sys_pipe` (22), `sys_pipe2` (293), `sys_dup` (32), `sys_dup2` (33), `sys_dup3` (292), and `sys_fcntl` (72) with `F_DUPFD`, `F_GETFD`, `F_SETFD` (`FD_CLOEXEC`), `F_GETFL`, `F_SETFL` (`O_NONBLOCK`).
+- **Directory Traversal**: `sys_getdents64` (217) populates 64-bit Linux `struct linux_dirent64` entries from FAT32/VFS directory streams. `sys_openat` (257) and `sys_fstatat` (262) resolve relative path descriptors and populate metadata.
+- **Terminal Control**: `sys_ioctl` (16) handles `TIOCGWINSZ`, `TCGETS`, `TCSETS`, and `FIONBIO`.
+- **Win32 Stream & Search Subsystem**: Implements `CreatePipe` (0x1014), `SetStdHandle` (0x1015), `CreateFileA` (0x1016), `CloseHandle` (0x1017), `FindFirstFileA` (0x1018), `FindNextFileA` (0x1019), and `FindClose` (0x101A) VDSO thunks and kernel shims.
+
+
 

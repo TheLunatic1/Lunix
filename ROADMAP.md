@@ -52,25 +52,25 @@ graph TD
 **Objective**: Build proper parent-child process management, address space duplication, program replacement, and user memory allocation for both Linux and Windows.
 
 #### 1.1 Linux Process Subsystem
-- [ ] **Per-Process File Descriptor Table**:
+- [x] **Per-Process File Descriptor Table**:
   - Integrate `fds: [Option<Arc<Mutex<FileDescriptor>>>; 64]` into every active process.
   - Pre-populate FD 0 (`stdin`), FD 1 (`stdout`), and FD 2 (`stderr`) on process birth.
-- [ ] **Process Lifecycle Syscalls**:
+- [x] **Process Lifecycle Syscalls**:
   - `sys_clone` (56) / `sys_fork` (57): Allocate child PID, duplicate file descriptors, clone or fork thread execution contexts.
   - `sys_execve` (59): Read ELF binary from VFS, allocate clean user address space, map `PT_LOAD` segments, construct System V stack (`argc`, `argv`, `envp`, `auxv`), and start execution at entry point.
   - `sys_wait4` (61): Block parent process on child completion, reap exit status code (`WEXITSTATUS`), and release process control blocks.
   - `sys_exit_group` (231): Terminate all threads belonging to the current process.
   - `sys_getppid` (110): Return parent process PID.
-- [ ] **Memory Management Syscalls**:
+- [x] **Memory Management Syscalls**:
   - `sys_brk` (12): Expand heap boundary for `malloc` in standard C runtimes.
   - `sys_mmap` (9) & `sys_munmap` (11): Allocate/free anonymous and file-backed virtual memory pages with user flags (`PROT_READ`, `PROT_WRITE`, `MAP_ANONYMOUS`).
 
 #### 1.2 Windows Win32 Execution Subsystem
-- [ ] **Win32 Process Management**:
+- [x] **Win32 Process Management**:
   - `CreateProcessA` in `kernel32.dll` shim: Parse command line, locate PE32+ binary, map sections, initialize Win32 stack, and return `PROCESS_INFORMATION`.
   - `WaitForSingleObject`: Block thread until process terminates.
   - `GetExitCodeProcess`: Retrieve terminated process exit code.
-- [ ] **Win32 Memory Management**:
+- [x] **Win32 Memory Management**:
   - `VirtualAlloc` (`MEM_COMMIT`, `MEM_RESERVE`, `PAGE_READWRITE`): Dynamically map 4 KiB pages into the Win32 user address space.
   - `VirtualFree` (`MEM_RELEASE`): Unmap and free physical frames.
   - `VirtualProtect`: Modify page protection flags.
@@ -85,22 +85,22 @@ graph TD
 **Objective**: Enable command pipelines (`cmd1 | cmd2`), file redirection (`cmd > out.txt`), and directory enumeration.
 
 #### 2.1 Linux Stream & VFS Syscalls
-- [ ] **Inter-Process Pipes**:
+- [x] **Inter-Process Pipes**:
   - `sys_pipe2` (293) & `sys_pipe` (22): Allocate unidirectional in-memory ring-buffer FIFO pipe with reader FD (`pipefd[0]`) and writer FD (`pipefd[1]`).
-- [ ] **File Descriptor Duplication**:
+- [x] **File Descriptor Duplication**:
   - `sys_dup` (32) & `sys_dup2` (33) / `sys_dup3` (292): Clone file descriptors to standard I/O handles for shell stream redirection.
   - `sys_fcntl` (72): Support `F_GETFD`, `F_SETFD` (`FD_CLOEXEC`), `F_GETFL`, `F_SETFL` (`O_NONBLOCK`).
-- [ ] **Directory Enumeration & Metadata**:
+- [x] **Directory Enumeration & Metadata**:
   - `sys_getdents64` (217): Traverse FAT32 and VFS directories and populate 64-bit Linux `struct linux_dirent64` entries for standard `ls` and `find`.
   - `sys_openat` (257) & `sys_fstatat` (262): Relative path file opening and metadata retrieval.
-- [ ] **Terminal I/O Control**:
+- [x] **Terminal I/O Control**:
   - `sys_ioctl` (16): Implement `TIOCGWINSZ` (terminal window rows/columns), `TCGETS` / `TCSETS` (termios raw/cooked mode).
 
 #### 2.2 Windows Win32 Stream APIs
-- [ ] **Win32 Pipe & Stream APIs**:
+- [x] **Win32 Pipe & Stream APIs**:
   - `CreatePipe`: Create anonymous pipe handles.
   - `SetStdHandle`: Redirect `STD_OUTPUT_HANDLE` / `STD_INPUT_HANDLE`.
-- [ ] **Win32 File & Directory Search**:
+- [x] **Win32 File & Directory Search**:
   - `FindFirstFileA` & `FindNextFileA`: Query directory contents and populate `WIN32_FIND_DATAA`.
   - `CreateFileA`, `ReadFile`, `WriteFile`, `CloseHandle`: Full Win32 file streaming.
 
@@ -188,8 +188,9 @@ graph TD
 | **`sys_clone` / `sys_fork` (56/57)** | ✅ **Complete** | **Milestone 1** |
 | **`sys_execve` (59) & `sys_wait4` (61)** | ✅ **Complete** | **Milestone 1** |
 | **Win32 `CreateProcessA` & `VirtualAlloc`** | ✅ **Complete** | **Milestone 1** |
-| `sys_pipe2` (293) & `sys_dup2` (33) | ⏳ Planned | Milestone 2 |
-| `sys_getdents64` (217) & `sys_ioctl` (16) | ⏳ Planned | Milestone 2 |
+| **`sys_pipe2` (293) & `sys_dup2` (33)** | ✅ **Complete** | **Milestone 2** |
+| **`sys_getdents64` (217) & `sys_ioctl` (16)** | ✅ **Complete** | **Milestone 2** |
+| **Win32 `CreatePipe`, `FindFirstFileA`** | ✅ **Complete** | **Milestone 2** |
 | Virtual `/dev` & `/proc` Pseudo-Filesystems | ⏳ Planned | Milestone 3 |
 | BusyBox `/bin/sh` Userspace Distribution | ⏳ Planned | Milestone 4 |
 | AHCI / NVMe / VirtIO & Expanded WDM Drivers | ⏳ Planned | Milestone 5 |

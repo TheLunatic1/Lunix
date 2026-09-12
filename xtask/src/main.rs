@@ -187,6 +187,18 @@ fn create_fat32_image(img_path: &Path, bootloader_bin: &Path, kernel_bin: &Path)
     let mut win_hello_file = bin_dir.create_file("win_hello.exe")?;
     win_hello_file.write_all(&win_hello_pe)?;
 
+    let test_pipe_elf = create_test_pipe_elf();
+    let mut test_pipe_file = bin_dir.create_file("test_pipe.elf")?;
+    test_pipe_file.write_all(&test_pipe_elf)?;
+
+    let test_dir_elf = create_test_dir_elf();
+    let mut test_dir_file = bin_dir.create_file("test_dir.elf")?;
+    test_dir_file.write_all(&test_dir_elf)?;
+
+    let win_stream_pe = create_win32_stream_exe();
+    let mut win_stream_file = bin_dir.create_file("win_stream.exe")?;
+    win_stream_file.write_all(&win_stream_pe)?;
+
 
     // Create /etc (os-release, hostname)
     root_dir.create_dir("etc")?;
@@ -662,6 +674,537 @@ fn create_win32_hello_exe() -> Vec<u8> {
     let call3_vaddr = 0x1000 + call3_pos as u32;
     let disp3 = (0x2040 as i32) - ((call3_vaddr + 6) as i32);
     pe[text_start + call3_pos + 2..text_start + call3_pos + 6].copy_from_slice(&disp3.to_le_bytes());
+
+    pe
+}
+
+fn create_test_pipe_elf() -> Vec<u8> {
+    let msg_child = b"\n  [CHILD] Hello from cloned child process through IPC pipe!\n";
+    let msg_parent_hdr = b"  [PARENT] Received message from child via IPC pipe: ";
+    let msg_done = b"  [PARENT] Successfully verified IPC pipe! Exiting with status 0.\n\n";
+
+    let mut payload = Vec::new();
+
+    // 1. Allocate 16 bytes for pipefd[2] on stack: sub rsp, 16
+    payload.extend_from_slice(&[0x48, 0x83, 0xEC, 0x10]);
+
+    // 2. sys_pipe2(&pipefd, 0)
+    // mov eax, 293 (0x125)
+    payload.extend_from_slice(&[0xB8, 0x25, 0x01, 0x00, 0x00]);
+    // mov rdi, rsp
+    payload.extend_from_slice(&[0x48, 0x89, 0xE7]);
+    // xor esi, esi
+    payload.extend_from_slice(&[0x31, 0xF6]);
+    // syscall
+    payload.extend_from_slice(&[0x0F, 0x05]);
+
+    // 3. sys_fork() -> sys_clone(0, 0)
+    payload.extend_from_slice(&[0xB8, 0x39, 0x00, 0x00, 0x00]); // mov eax, 57
+    payload.extend_from_slice(&[0x31, 0xFF]); // xor edi, edi
+    payload.extend_from_slice(&[0x31, 0xF6]); // xor esi, esi
+    payload.extend_from_slice(&[0x0F, 0x05]); // syscall
+
+    // test rax, rax
+    payload.extend_from_slice(&[0x48, 0x85, 0xC0]);
+    // jz rel32 child_branch (0x0F 0x84 disp32)
+    let jz_pos = payload.len();
+    payload.extend_from_slice(&[0x0F, 0x84, 0x00, 0x00, 0x00, 0x00]);
+
+    // --- PARENT BRANCH ---
+    // sys_close(write_fd): mov eax, 3; mov edi, dword ptr [rsp + 4]; syscall
+    payload.extend_from_slice(&[0xB8, 0x03, 0x00, 0x00, 0x00]);
+    payload.extend_from_slice(&[0x8B, 0x7C, 0x24, 0x04]);
+    payload.extend_from_slice(&[0x0F, 0x05]);
+
+    // Allocate 128 bytes buffer: sub rsp, 128
+    payload.extend_from_slice(&[0x48, 0x81, 0xEC, 0x80, 0x00, 0x00, 0x00]);
+
+    // sys_read(read_fd, rsp, 128): mov eax, 0; mov edi, [rsp + 128]; mov rsi, rsp; mov edx, 128; syscall
+    payload.extend_from_slice(&[0xB8, 0x00, 0x00, 0x00, 0x00]); // mov eax, 0
+    payload.extend_from_slice(&[0x8B, 0xBC, 0x24, 0x80, 0x00, 0x00, 0x00]); // mov edi, [rsp + 128]
+    payload.extend_from_slice(&[0x48, 0x89, 0xE6]);             // mov rsi, rsp
+    payload.extend_from_slice(&[0xBA, 0x80, 0x00, 0x00, 0x00]); // mov edx, 128
+    payload.extend_from_slice(&[0x0F, 0x05]);                   // syscall
+    payload.extend_from_slice(&[0x49, 0x89, 0xC6]);             // mov r14, rax (bytes read)
+
+    // sys_write(1, msg_parent_hdr, len)
+    payload.extend_from_slice(&[0xB8, 0x01, 0x00, 0x00, 0x00]); // mov eax, 1
+    payload.extend_from_slice(&[0xBF, 0x01, 0x00, 0x00, 0x00]); // mov edi, 1
+    let lea_p_hdr_pos = payload.len();
+    payload.extend_from_slice(&[0x48, 0x8D, 0x35, 0x00, 0x00, 0x00, 0x00]);
+    let len_p_hdr = msg_parent_hdr.len() as u32;
+    payload.extend_from_slice(&[0xBA, len_p_hdr as u8, (len_p_hdr >> 8) as u8, (len_p_hdr >> 16) as u8, (len_p_hdr >> 24) as u8]);
+    payload.extend_from_slice(&[0x0F, 0x05]); // syscall
+
+    // sys_write(1, rsp, r14)
+    payload.extend_from_slice(&[0xB8, 0x01, 0x00, 0x00, 0x00]); // mov eax, 1
+    payload.extend_from_slice(&[0xBF, 0x01, 0x00, 0x00, 0x00]); // mov edi, 1
+    payload.extend_from_slice(&[0x48, 0x89, 0xE6]);             // mov rsi, rsp
+    payload.extend_from_slice(&[0x4C, 0x89, 0xF2]);             // mov rdx, r14
+    payload.extend_from_slice(&[0x0F, 0x05]);                   // syscall
+
+    // sys_write(1, msg_done, len)
+    payload.extend_from_slice(&[0xB8, 0x01, 0x00, 0x00, 0x00]); // mov eax, 1
+    payload.extend_from_slice(&[0xBF, 0x01, 0x00, 0x00, 0x00]); // mov edi, 1
+    let lea_done_pos = payload.len();
+    payload.extend_from_slice(&[0x48, 0x8D, 0x35, 0x00, 0x00, 0x00, 0x00]);
+    let len_done = msg_done.len() as u32;
+    payload.extend_from_slice(&[0xBA, len_done as u8, (len_done >> 8) as u8, (len_done >> 16) as u8, (len_done >> 24) as u8]);
+    payload.extend_from_slice(&[0x0F, 0x05]); // syscall
+
+    // sys_close(read_fd): mov eax, 3; mov edi, [rsp + 128]; syscall
+    payload.extend_from_slice(&[0xB8, 0x03, 0x00, 0x00, 0x00]);
+    payload.extend_from_slice(&[0x8B, 0xBC, 0x24, 0x80, 0x00, 0x00, 0x00]);
+    payload.extend_from_slice(&[0x0F, 0x05]);
+
+    // Free buffer: add rsp, 128
+    payload.extend_from_slice(&[0x48, 0x81, 0xC4, 0x80, 0x00, 0x00, 0x00]);
+
+    // sys_wait4(-1, rsp, 0)
+    payload.extend_from_slice(&[0xB8, 0x3D, 0x00, 0x00, 0x00]); // mov eax, 61
+    payload.extend_from_slice(&[0x48, 0xC7, 0xC7, 0xFF, 0xFF, 0xFF, 0xFF]); // mov rdi, -1
+    payload.extend_from_slice(&[0x48, 0x89, 0xE6]); // mov rsi, rsp
+    payload.extend_from_slice(&[0x31, 0xD2]); // xor edx, edx
+    payload.extend_from_slice(&[0x0F, 0x05]); // syscall
+
+    // Free pipefd: add rsp, 16
+    payload.extend_from_slice(&[0x48, 0x83, 0xC4, 0x10]);
+
+    // sys_exit(0)
+    payload.extend_from_slice(&[0xB8, 0x3C, 0x00, 0x00, 0x00]); // mov eax, 60
+    payload.extend_from_slice(&[0x31, 0xFF]); // xor edi, edi
+    payload.extend_from_slice(&[0x0F, 0x05]); // syscall
+    payload.extend_from_slice(&[0xF4, 0xEB, 0xFD]); // hlt; jmp $-1
+
+    // --- CHILD BRANCH ---
+    let child_start = payload.len();
+    let jz_disp = (child_start as i32) - ((jz_pos + 6) as i32);
+    payload[jz_pos + 2..jz_pos + 6].copy_from_slice(&jz_disp.to_le_bytes());
+
+    // sys_close(read_fd): mov eax, 3; mov edi, [rsp]; syscall
+    payload.extend_from_slice(&[0xB8, 0x03, 0x00, 0x00, 0x00]);
+    payload.extend_from_slice(&[0x8B, 0x3C, 0x24]);
+    payload.extend_from_slice(&[0x0F, 0x05]);
+
+    // sys_write(write_fd, msg_child, len): mov eax, 1; mov edi, [rsp + 4]; lea rsi, [rip+msg_child]; mov edx, len; syscall
+    payload.extend_from_slice(&[0xB8, 0x01, 0x00, 0x00, 0x00]); // mov eax, 1
+    payload.extend_from_slice(&[0x8B, 0x7C, 0x24, 0x04]);       // mov edi, [rsp + 4]
+    let lea_c_pos = payload.len();
+    payload.extend_from_slice(&[0x48, 0x8D, 0x35, 0x00, 0x00, 0x00, 0x00]);
+    let len_c = msg_child.len() as u32;
+    payload.extend_from_slice(&[0xBA, len_c as u8, (len_c >> 8) as u8, (len_c >> 16) as u8, (len_c >> 24) as u8]);
+    payload.extend_from_slice(&[0x0F, 0x05]); // syscall
+
+    // sys_close(write_fd): mov eax, 3; mov edi, [rsp + 4]; syscall
+    payload.extend_from_slice(&[0xB8, 0x03, 0x00, 0x00, 0x00]);
+    payload.extend_from_slice(&[0x8B, 0x7C, 0x24, 0x04]);
+    payload.extend_from_slice(&[0x0F, 0x05]);
+
+    // Free pipefd: add rsp, 16
+    payload.extend_from_slice(&[0x48, 0x83, 0xC4, 0x10]);
+
+    // sys_exit(0)
+    payload.extend_from_slice(&[0xB8, 0x3C, 0x00, 0x00, 0x00]); // mov eax, 60
+    payload.extend_from_slice(&[0x31, 0xFF]); // xor edi, edi
+    payload.extend_from_slice(&[0x0F, 0x05]); // syscall
+    payload.extend_from_slice(&[0xF4, 0xEB, 0xFD]); // hlt; jmp $-1
+
+    // Data sections
+    let p_hdr_pos = payload.len();
+    payload.extend_from_slice(msg_parent_hdr);
+    let done_pos = payload.len();
+    payload.extend_from_slice(msg_done);
+    let c_pos = payload.len();
+    payload.extend_from_slice(msg_child);
+
+    // Patch LEAs
+    let disp_p_hdr = (p_hdr_pos as i32) - ((lea_p_hdr_pos + 7) as i32);
+    payload[lea_p_hdr_pos + 3..lea_p_hdr_pos + 7].copy_from_slice(&disp_p_hdr.to_le_bytes());
+
+    let disp_done = (done_pos as i32) - ((lea_done_pos + 7) as i32);
+    payload[lea_done_pos + 3..lea_done_pos + 7].copy_from_slice(&disp_done.to_le_bytes());
+
+    let disp_c = (c_pos as i32) - ((lea_c_pos + 7) as i32);
+    payload[lea_c_pos + 3..lea_c_pos + 7].copy_from_slice(&disp_c.to_le_bytes());
+
+    build_elf64_binary(&payload)
+}
+
+fn create_test_dir_elf() -> Vec<u8> {
+    let msg_start = b"\n  ===============================================================\n  [LINUX DIR TEST] Querying /bin directory entries via sys_getdents64\n  ===============================================================\n";
+    let path_bin = b"/bin\0";
+    let msg_found = b"  [DIR] Found directory entry from sys_getdents64 in /bin\n";
+    let msg_done = b"  [DIR] Directory traversal test completed successfully!\n\n";
+
+    let mut payload = Vec::new();
+
+    // 1. sys_write(1, msg_start, len)
+    payload.extend_from_slice(&[0xB8, 0x01, 0x00, 0x00, 0x00]); // mov eax, 1
+    payload.extend_from_slice(&[0xBF, 0x01, 0x00, 0x00, 0x00]); // mov edi, 1
+    let lea_start_pos = payload.len();
+    payload.extend_from_slice(&[0x48, 0x8D, 0x35, 0x00, 0x00, 0x00, 0x00]);
+    let len_start = msg_start.len() as u32;
+    payload.extend_from_slice(&[0xBA, len_start as u8, (len_start >> 8) as u8, (len_start >> 16) as u8, (len_start >> 24) as u8]);
+    payload.extend_from_slice(&[0x0F, 0x05]); // syscall
+
+    // 2. sys_openat(AT_FDCWD = -100, "/bin", O_RDONLY = 0)
+    payload.extend_from_slice(&[0xB8, 0x01, 0x01, 0x00, 0x00]); // mov eax, 257 (sys_openat)
+    payload.extend_from_slice(&[0xBF, 0x9C, 0xFF, 0xFF, 0xFF]); // mov edi, -100 (AT_FDCWD)
+    let lea_path_pos = payload.len();
+    payload.extend_from_slice(&[0x48, 0x8D, 0x35, 0x00, 0x00, 0x00, 0x00]); // lea rsi, [rip + path_bin]
+    payload.extend_from_slice(&[0x31, 0xD2]); // xor edx, edx
+    payload.extend_from_slice(&[0x0F, 0x05]); // syscall
+    payload.extend_from_slice(&[0x49, 0x89, 0xC4]); // mov r12, rax (fd)
+
+    // 3. Allocate 512 bytes on stack for dirp buffer: sub rsp, 512
+    payload.extend_from_slice(&[0x48, 0x81, 0xEC, 0x00, 0x02, 0x00, 0x00]);
+
+    // 4. sys_getdents64(r12, rsp, 512)
+    payload.extend_from_slice(&[0xB8, 0xD9, 0x00, 0x00, 0x00]); // mov eax, 217 (sys_getdents64)
+    payload.extend_from_slice(&[0x4C, 0x89, 0xE7]);             // mov rdi, r12
+    payload.extend_from_slice(&[0x48, 0x89, 0xE6]);             // mov rsi, rsp
+    payload.extend_from_slice(&[0xBA, 0x00, 0x02, 0x00, 0x00]); // mov edx, 512
+    payload.extend_from_slice(&[0x0F, 0x05]);                   // syscall
+
+    // 5. sys_write(1, msg_found, len)
+    payload.extend_from_slice(&[0xB8, 0x01, 0x00, 0x00, 0x00]); // mov eax, 1
+    payload.extend_from_slice(&[0xBF, 0x01, 0x00, 0x00, 0x00]); // mov edi, 1
+    let lea_found_pos = payload.len();
+    payload.extend_from_slice(&[0x48, 0x8D, 0x35, 0x00, 0x00, 0x00, 0x00]);
+    let len_found = msg_found.len() as u32;
+    payload.extend_from_slice(&[0xBA, len_found as u8, (len_found >> 8) as u8, (len_found >> 16) as u8, (len_found >> 24) as u8]);
+    payload.extend_from_slice(&[0x0F, 0x05]); // syscall
+
+    // 6. Free buffer: add rsp, 512
+    payload.extend_from_slice(&[0x48, 0x81, 0xC4, 0x00, 0x02, 0x00, 0x00]);
+
+    // 7. sys_close(fd)
+    payload.extend_from_slice(&[0xB8, 0x03, 0x00, 0x00, 0x00]); // mov eax, 3
+    payload.extend_from_slice(&[0x4C, 0x89, 0xE7]);             // mov rdi, r12
+    payload.extend_from_slice(&[0x0F, 0x05]);                   // syscall
+
+    // 8. sys_write(1, msg_done, len)
+    payload.extend_from_slice(&[0xB8, 0x01, 0x00, 0x00, 0x00]); // mov eax, 1
+    payload.extend_from_slice(&[0xBF, 0x01, 0x00, 0x00, 0x00]); // mov edi, 1
+    let lea_done_pos = payload.len();
+    payload.extend_from_slice(&[0x48, 0x8D, 0x35, 0x00, 0x00, 0x00, 0x00]);
+    let len_done = msg_done.len() as u32;
+    payload.extend_from_slice(&[0xBA, len_done as u8, (len_done >> 8) as u8, (len_done >> 16) as u8, (len_done >> 24) as u8]);
+    payload.extend_from_slice(&[0x0F, 0x05]); // syscall
+
+    // 9. sys_exit(0)
+    payload.extend_from_slice(&[0xB8, 0x3C, 0x00, 0x00, 0x00]); // mov eax, 60
+    payload.extend_from_slice(&[0x31, 0xFF]); // xor edi, edi
+    payload.extend_from_slice(&[0x0F, 0x05]); // syscall
+    payload.extend_from_slice(&[0xF4, 0xEB, 0xFD]);
+
+    let start_pos = payload.len();
+    payload.extend_from_slice(msg_start);
+    let path_pos = payload.len();
+    payload.extend_from_slice(path_bin);
+    let found_pos = payload.len();
+    payload.extend_from_slice(msg_found);
+    let done_pos = payload.len();
+    payload.extend_from_slice(msg_done);
+
+    let disp_start = (start_pos as i32) - ((lea_start_pos + 7) as i32);
+    payload[lea_start_pos + 3..lea_start_pos + 7].copy_from_slice(&disp_start.to_le_bytes());
+
+    let disp_path = (path_pos as i32) - ((lea_path_pos + 7) as i32);
+    payload[lea_path_pos + 3..lea_path_pos + 7].copy_from_slice(&disp_path.to_le_bytes());
+
+    let disp_found = (found_pos as i32) - ((lea_found_pos + 7) as i32);
+    payload[lea_found_pos + 3..lea_found_pos + 7].copy_from_slice(&disp_found.to_le_bytes());
+
+    let disp_done = (done_pos as i32) - ((lea_done_pos + 7) as i32);
+    payload[lea_done_pos + 3..lea_done_pos + 7].copy_from_slice(&disp_done.to_le_bytes());
+
+    build_elf64_binary(&payload)
+}
+
+fn create_win32_stream_exe() -> Vec<u8> {
+    let mut pe = vec![0u8; 2048]; // 512 headers + 512 .text + 1024 .rdata
+
+    // 1. DOS Header (64 bytes)
+    pe[0..2].copy_from_slice(&[0x4D, 0x5A]); // 'MZ'
+    pe[0x3C..0x40].copy_from_slice(&64u32.to_le_bytes()); // e_lfanew = 64
+
+    // 2. PE Signature (4 bytes at offset 64)
+    pe[64..68].copy_from_slice(b"PE\0\0");
+
+    // 3. COFF File Header (20 bytes at offset 68)
+    pe[68..70].copy_from_slice(&0x8664u16.to_le_bytes()); // Machine: AMD64
+    pe[70..72].copy_from_slice(&2u16.to_le_bytes()); // NumberOfSections: 2
+    pe[72..76].copy_from_slice(&0x66E00000u32.to_le_bytes()); // TimeDateStamp
+    pe[76..80].copy_from_slice(&0u32.to_le_bytes()); // PointerToSymbolTable
+    pe[80..84].copy_from_slice(&0u32.to_le_bytes()); // NumberOfSymbols
+    pe[84..86].copy_from_slice(&240u16.to_le_bytes()); // SizeOfOptionalHeader = 240
+    pe[86..88].copy_from_slice(&0x0022u16.to_le_bytes()); // Characteristics: EXECUTABLE_IMAGE | LARGE_ADDRESS_AWARE
+
+    // 4. Optional Header (240 bytes at offset 88)
+    let opt = 88;
+    pe[opt..opt + 2].copy_from_slice(&0x020Bu16.to_le_bytes()); // Magic: PE32+ (64-bit)
+    pe[opt + 2] = 14; // MajorLinkerVersion
+    pe[opt + 3] = 0;  // MinorLinkerVersion
+    pe[opt + 4..opt + 8].copy_from_slice(&512u32.to_le_bytes()); // SizeOfCode
+    pe[opt + 8..opt + 12].copy_from_slice(&1024u32.to_le_bytes()); // SizeOfInitializedData
+    pe[opt + 12..opt + 16].copy_from_slice(&0u32.to_le_bytes()); // SizeOfUninitializedData
+    pe[opt + 16..opt + 20].copy_from_slice(&0x1000u32.to_le_bytes()); // AddressOfEntryPoint = 0x1000 (.text)
+    pe[opt + 20..opt + 24].copy_from_slice(&0x1000u32.to_le_bytes()); // BaseOfCode = 0x1000
+    pe[opt + 24..opt + 32].copy_from_slice(&0x0040_0000u64.to_le_bytes()); // ImageBase = 0x400000
+    pe[opt + 32..opt + 36].copy_from_slice(&0x1000u32.to_le_bytes()); // SectionAlignment = 4096
+    pe[opt + 36..opt + 40].copy_from_slice(&0x200u32.to_le_bytes()); // FileAlignment = 512
+    pe[opt + 40..opt + 42].copy_from_slice(&6u16.to_le_bytes()); // MajorOperatingSystemVersion
+    pe[opt + 42..opt + 44].copy_from_slice(&0u16.to_le_bytes()); // MinorOperatingSystemVersion
+    pe[opt + 48..opt + 50].copy_from_slice(&6u16.to_le_bytes()); // MajorSubsystemVersion
+    pe[opt + 50..opt + 52].copy_from_slice(&0u16.to_le_bytes()); // MinorSubsystemVersion
+    pe[opt + 56..opt + 60].copy_from_slice(&0x3000u32.to_le_bytes()); // SizeOfImage = 12 KiB (3 * 4096)
+    pe[opt + 60..opt + 64].copy_from_slice(&0x200u32.to_le_bytes()); // SizeOfHeaders = 512
+    pe[opt + 68..opt + 70].copy_from_slice(&3u16.to_le_bytes()); // Subsystem: IMAGE_SUBSYSTEM_WINDOWS_CUI (3)
+    pe[opt + 70..opt + 72].copy_from_slice(&0x8160u16.to_le_bytes()); // DllCharacteristics
+    pe[opt + 72..opt + 80].copy_from_slice(&0x100000u64.to_le_bytes()); // SizeOfStackReserve (1 MB)
+    pe[opt + 80..opt + 88].copy_from_slice(&0x1000u64.to_le_bytes()); // SizeOfStackCommit (4 KB)
+    pe[opt + 88..opt + 96].copy_from_slice(&0x100000u64.to_le_bytes()); // SizeOfHeapReserve (1 MB)
+    pe[opt + 96..opt + 104].copy_from_slice(&0x1000u64.to_le_bytes()); // SizeOfHeapCommit (4 KB)
+    pe[opt + 108..opt + 112].copy_from_slice(&16u32.to_le_bytes()); // NumberOfRvaAndSizes = 16
+
+    // Data Directory 1: Import Table (at opt + 120)
+    let dd_import = opt + 120;
+    pe[dd_import..dd_import + 4].copy_from_slice(&0x2000u32.to_le_bytes()); // Import Directory RVA = 0x2000 (.rdata)
+    pe[dd_import + 4..dd_import + 8].copy_from_slice(&40u32.to_le_bytes()); // Import Directory Size = 40
+
+    // 5. Section Headers (2 * 40 bytes at offset 88 + 240 = 328)
+    let sec1 = 328;
+    // Section 1: .text
+    pe[sec1..sec1 + 8].copy_from_slice(b".text\0\0\0");
+    pe[sec1 + 8..sec1 + 12].copy_from_slice(&512u32.to_le_bytes()); // VirtualSize
+    pe[sec1 + 12..sec1 + 16].copy_from_slice(&0x1000u32.to_le_bytes()); // VirtualAddress
+    pe[sec1 + 16..sec1 + 20].copy_from_slice(&512u32.to_le_bytes()); // SizeOfRawData
+    pe[sec1 + 20..sec1 + 24].copy_from_slice(&0x200u32.to_le_bytes()); // PointerToRawData = 512
+    pe[sec1 + 36..sec1 + 40].copy_from_slice(&0x60000020u32.to_le_bytes()); // Characteristics: CODE | EXECUTE | READ
+
+    let sec2 = sec1 + 40;
+    // Section 2: .rdata
+    pe[sec2..sec2 + 8].copy_from_slice(b".rdata\0\0");
+    pe[sec2 + 8..sec2 + 12].copy_from_slice(&1024u32.to_le_bytes()); // VirtualSize
+    pe[sec2 + 12..sec2 + 16].copy_from_slice(&0x2000u32.to_le_bytes()); // VirtualAddress
+    pe[sec2 + 16..sec2 + 20].copy_from_slice(&1024u32.to_le_bytes()); // SizeOfRawData
+    pe[sec2 + 20..sec2 + 24].copy_from_slice(&0x400u32.to_le_bytes()); // PointerToRawData = 1024
+    pe[sec2 + 36..sec2 + 40].copy_from_slice(&0x40000040u32.to_le_bytes()); // Characteristics: INITIALIZED_DATA | READ
+
+    // String constants
+    let banner_str = b"\n  ===============================================================\n  [WIN32 STREAMS] 64-bit Windows PE32+ (/bin/win_stream.exe)\n  ===============================================================\n";
+    let pipe_str = b"\n  [WIN32 PIPE] Message transferred across Win32 CreatePipe stream!\n";
+    let find_str = b"  [WIN32 FIND] Successfully queried /bin directory via FindFirstFileA!\n  [WIN32] All Win32 stream tests passed successfully!\n\n";
+    let search_str = b"/bin/*\0";
+
+    let banner_len = banner_str.len() as u32;
+    let pipe_msg_len = pipe_str.len() as u32;
+    let find_msg_len = find_str.len() as u32;
+
+    // 6. .text Section Content (at raw offset 512)
+    let text_start = 512;
+    let mut code = Vec::new();
+
+    // sub rsp, 0x300 (allocate 768 bytes: shadow space + stack locals + Win32FindDataA)
+    code.extend_from_slice(&[0x48, 0x81, 0xEC, 0x00, 0x03, 0x00, 0x00]);
+
+    // 1) CreatePipe(&[rsp+0x20], &[rsp+0x28], NULL, 0)
+    code.extend_from_slice(&[0x48, 0x8D, 0x4C, 0x24, 0x20]); // lea rcx, [rsp+0x20]
+    code.extend_from_slice(&[0x48, 0x8D, 0x54, 0x24, 0x28]); // lea rdx, [rsp+0x28]
+    code.extend_from_slice(&[0x4D, 0x31, 0xC0]);             // xor r8, r8
+    code.extend_from_slice(&[0x45, 0x31, 0xC9]);             // xor r9d, r9d
+    let call_createpipe_pos = code.len();
+    code.extend_from_slice(&[0xFF, 0x15, 0x00, 0x00, 0x00, 0x00]);
+
+    // mov r12, [rsp+0x20] (hRead)
+    code.extend_from_slice(&[0x4C, 0x8B, 0x64, 0x24, 0x20]);
+    // mov r13, [rsp+0x28] (hWrite)
+    code.extend_from_slice(&[0x4C, 0x8B, 0x6C, 0x24, 0x28]);
+
+    // 2) WriteFile(hWrite, &pipe_msg, pipe_msg.len(), &[rsp+0x30], NULL)
+    code.extend_from_slice(&[0x4C, 0x89, 0xE9]);             // mov rcx, r13
+    let lea_pipe_msg_pos = code.len();
+    code.extend_from_slice(&[0x48, 0x8D, 0x15, 0x00, 0x00, 0x00, 0x00]); // lea rdx, [rip + pipe_msg]
+    code.extend_from_slice(&[0x41, 0xB8, pipe_msg_len as u8, (pipe_msg_len >> 8) as u8, (pipe_msg_len >> 16) as u8, (pipe_msg_len >> 24) as u8]);
+    code.extend_from_slice(&[0x4C, 0x8D, 0x4C, 0x24, 0x30]); // lea r9, [rsp+0x30]
+    code.extend_from_slice(&[0x48, 0xC7, 0x44, 0x24, 0x20, 0x00, 0x00, 0x00, 0x00]); // [rsp+0x20] = 0
+    let call_writefile_pos = code.len();
+    code.extend_from_slice(&[0xFF, 0x15, 0x00, 0x00, 0x00, 0x00]);
+
+    // 3) ReadFile(hRead, &[rsp+0x40], pipe_msg_len, &[rsp+0x38], NULL)
+    code.extend_from_slice(&[0x4C, 0x89, 0xE1]);             // mov rcx, r12
+    code.extend_from_slice(&[0x48, 0x8D, 0x54, 0x24, 0x40]); // lea rdx, [rsp+0x40]
+    code.extend_from_slice(&[0x41, 0xB8, pipe_msg_len as u8, (pipe_msg_len >> 8) as u8, (pipe_msg_len >> 16) as u8, (pipe_msg_len >> 24) as u8]);
+    code.extend_from_slice(&[0x4C, 0x8D, 0x4C, 0x24, 0x38]); // lea r9, [rsp+0x38]
+    code.extend_from_slice(&[0x48, 0xC7, 0x44, 0x24, 0x20, 0x00, 0x00, 0x00, 0x00]);
+    let call_readfile_pos = code.len();
+    code.extend_from_slice(&[0xFF, 0x15, 0x00, 0x00, 0x00, 0x00]);
+
+    // 4) GetStdHandle(STD_OUTPUT_HANDLE = -11)
+    code.extend_from_slice(&[0xB9, 0xF5, 0xFF, 0xFF, 0xFF]);
+    let call_getstd_pos = code.len();
+    code.extend_from_slice(&[0xFF, 0x15, 0x00, 0x00, 0x00, 0x00]);
+    code.extend_from_slice(&[0x49, 0x89, 0xC7]); // mov r15, rax (save hStdOut in r15)
+
+    // 5) WriteConsoleA(hStdOut, &banner_msg, banner_len, NULL, NULL)
+    code.extend_from_slice(&[0x4C, 0x89, 0xF9]); // mov rcx, r15
+    let lea_banner_pos = code.len();
+    code.extend_from_slice(&[0x48, 0x8D, 0x15, 0x00, 0x00, 0x00, 0x00]);
+    code.extend_from_slice(&[0x41, 0xB8, banner_len as u8, (banner_len >> 8) as u8, (banner_len >> 16) as u8, (banner_len >> 24) as u8]);
+    code.extend_from_slice(&[0x45, 0x31, 0xC9]);
+    code.extend_from_slice(&[0x48, 0xC7, 0x44, 0x24, 0x20, 0x00, 0x00, 0x00, 0x00]);
+    let call_writecon1_pos = code.len();
+    code.extend_from_slice(&[0xFF, 0x15, 0x00, 0x00, 0x00, 0x00]);
+
+    // 5b) WriteConsoleA(hStdOut, &[rsp+0x40], pipe_msg_len, NULL, NULL) -> output received pipe message!
+    code.extend_from_slice(&[0x4C, 0x89, 0xF9]); // mov rcx, r15
+    code.extend_from_slice(&[0x48, 0x8D, 0x54, 0x24, 0x40]); // lea rdx, [rsp+0x40]
+    code.extend_from_slice(&[0x41, 0xB8, pipe_msg_len as u8, (pipe_msg_len >> 8) as u8, (pipe_msg_len >> 16) as u8, (pipe_msg_len >> 24) as u8]);
+    code.extend_from_slice(&[0x45, 0x31, 0xC9]);
+    code.extend_from_slice(&[0x48, 0xC7, 0x44, 0x24, 0x20, 0x00, 0x00, 0x00, 0x00]);
+    let call_writecon_pipe_pos = code.len();
+    code.extend_from_slice(&[0xFF, 0x15, 0x00, 0x00, 0x00, 0x00]);
+
+    // 6) CloseHandle(hRead), CloseHandle(hWrite)
+    code.extend_from_slice(&[0x4C, 0x89, 0xE1]); // mov rcx, r12
+    let call_close1_pos = code.len();
+    code.extend_from_slice(&[0xFF, 0x15, 0x00, 0x00, 0x00, 0x00]);
+    code.extend_from_slice(&[0x4C, 0x89, 0xE9]); // mov rcx, r13
+    let call_close2_pos = code.len();
+    code.extend_from_slice(&[0xFF, 0x15, 0x00, 0x00, 0x00, 0x00]);
+
+    // 7) FindFirstFileA("/bin/*", &[rsp+0xC0])
+    let lea_search_pos = code.len();
+    code.extend_from_slice(&[0x48, 0x8D, 0x0D, 0x00, 0x00, 0x00, 0x00]); // lea rcx, [rip + search_pattern]
+    code.extend_from_slice(&[0x48, 0x8D, 0x94, 0x24, 0xC0, 0x00, 0x00, 0x00]); // lea rdx, [rsp+0xC0]
+    let call_findfirst_pos = code.len();
+    code.extend_from_slice(&[0xFF, 0x15, 0x00, 0x00, 0x00, 0x00]);
+    code.extend_from_slice(&[0x49, 0x89, 0xC6]); // mov r14, rax (hFind)
+
+    // 8) FindClose(hFind)
+    code.extend_from_slice(&[0x4C, 0x89, 0xF1]); // mov rcx, r14
+    let call_findclose_pos = code.len();
+    code.extend_from_slice(&[0xFF, 0x15, 0x00, 0x00, 0x00, 0x00]);
+
+    // 9) WriteConsoleA(hStdOut, &find_msg, find_msg_len, NULL, NULL)
+    code.extend_from_slice(&[0x4C, 0x89, 0xF9]); // mov rcx, r15
+    let lea_find_msg_pos = code.len();
+    code.extend_from_slice(&[0x48, 0x8D, 0x15, 0x00, 0x00, 0x00, 0x00]);
+    code.extend_from_slice(&[0x41, 0xB8, find_msg_len as u8, (find_msg_len >> 8) as u8, (find_msg_len >> 16) as u8, (find_msg_len >> 24) as u8]);
+    code.extend_from_slice(&[0x45, 0x31, 0xC9]);
+    code.extend_from_slice(&[0x48, 0xC7, 0x44, 0x24, 0x20, 0x00, 0x00, 0x00, 0x00]);
+    let call_writecon2_pos = code.len();
+    code.extend_from_slice(&[0xFF, 0x15, 0x00, 0x00, 0x00, 0x00]);
+
+    // 10) ExitProcess(0)
+    code.extend_from_slice(&[0x31, 0xC9]);
+    let call_exit_pos = code.len();
+    code.extend_from_slice(&[0xFF, 0x15, 0x00, 0x00, 0x00, 0x00]);
+
+    // add rsp, 0x300; ret
+    code.extend_from_slice(&[0x48, 0x81, 0xC4, 0x00, 0x03, 0x00, 0x00, 0xC3]);
+    pe[text_start..text_start + code.len()].copy_from_slice(&code);
+
+    // 7. .rdata Section Content (at raw offset 1024, VirtualAddress = 0x2000)
+    let rdata_start = 1024;
+    let rdata_vaddr = 0x2000u32;
+
+    let ilt_rva = rdata_vaddr + 0x80;
+    let dll_name_rva = rdata_vaddr + 0xD0;
+    let iat_rva = rdata_vaddr + 0x30;
+
+    // ImageImportDescriptor:
+    pe[rdata_start..rdata_start + 4].copy_from_slice(&ilt_rva.to_le_bytes());
+    pe[rdata_start + 12..rdata_start + 16].copy_from_slice(&dll_name_rva.to_le_bytes());
+    pe[rdata_start + 16..rdata_start + 20].copy_from_slice(&iat_rva.to_le_bytes());
+
+    // Hint/Names RVAs:
+    let hn_getstd = rdata_vaddr + 0xE0;
+    let hn_writecon = rdata_vaddr + 0xF0;
+    let hn_createpipe = rdata_vaddr + 0x100;
+    let hn_writefile = rdata_vaddr + 0x110;
+    let hn_readfile = rdata_vaddr + 0x120;
+    let hn_close = rdata_vaddr + 0x130;
+    let hn_findfirst = rdata_vaddr + 0x140;
+    let hn_findclose = rdata_vaddr + 0x150;
+    let hn_exit = rdata_vaddr + 0x160;
+
+    // Write IAT (0x30..0x78) and ILT (0x80..0xC8)
+    let iat_ptrs = [hn_getstd, hn_writecon, hn_createpipe, hn_writefile, hn_readfile, hn_close, hn_findfirst, hn_findclose, hn_exit];
+    for (i, &ptr) in iat_ptrs.iter().enumerate() {
+        pe[rdata_start + 0x30 + i * 8..rdata_start + 0x30 + i * 8 + 8].copy_from_slice(&(ptr as u64).to_le_bytes());
+        pe[rdata_start + 0x80 + i * 8..rdata_start + 0x80 + i * 8 + 8].copy_from_slice(&(ptr as u64).to_le_bytes());
+    }
+
+    // Write DLL Name
+    pe[rdata_start + 0xD0..rdata_start + 0xDD].copy_from_slice(b"kernel32.dll\0");
+
+    // Write Hint/Names (each prefixed with 2-byte hint = 0)
+    pe[rdata_start + 0xE2..rdata_start + 0xEF].copy_from_slice(b"GetStdHandle\0");
+    pe[rdata_start + 0xF2..rdata_start + 0x100].copy_from_slice(b"WriteConsoleA\0");
+    pe[rdata_start + 0x102..rdata_start + 0x10D].copy_from_slice(b"CreatePipe\0");
+    pe[rdata_start + 0x112..rdata_start + 0x11C].copy_from_slice(b"WriteFile\0");
+    pe[rdata_start + 0x122..rdata_start + 0x12B].copy_from_slice(b"ReadFile\0");
+    pe[rdata_start + 0x132..rdata_start + 0x13E].copy_from_slice(b"CloseHandle\0");
+    pe[rdata_start + 0x142..rdata_start + 0x151].copy_from_slice(b"FindFirstFileA\0");
+    pe[rdata_start + 0x152..rdata_start + 0x15C].copy_from_slice(b"FindClose\0");
+    pe[rdata_start + 0x162..rdata_start + 0x16E].copy_from_slice(b"ExitProcess\0");
+
+    // Messages & Data in .rdata (at 0x180)
+    let banner_rva = rdata_vaddr + 0x180;
+    let pipe_rva = banner_rva + banner_str.len() as u32;
+    let find_rva = pipe_rva + pipe_str.len() as u32;
+    let search_rva = find_rva + find_str.len() as u32;
+
+    pe[rdata_start + 0x180..rdata_start + 0x180 + banner_str.len()].copy_from_slice(banner_str);
+    let p_off = 0x180 + banner_str.len();
+    pe[rdata_start + p_off..rdata_start + p_off + pipe_str.len()].copy_from_slice(pipe_str);
+    let f_off = p_off + pipe_str.len();
+    pe[rdata_start + f_off..rdata_start + f_off + find_str.len()].copy_from_slice(find_str);
+    let s_off = f_off + find_str.len();
+    pe[rdata_start + s_off..rdata_start + s_off + search_str.len()].copy_from_slice(search_str);
+
+    // Patch .text RIP-relative calls and LEAs
+    let patch_call = |pe: &mut [u8], pos: usize, target_rva: u32| {
+        let vaddr = 0x1000 + pos as u32;
+        let disp = (target_rva as i32) - ((vaddr + 6) as i32);
+        pe[text_start + pos + 2..text_start + pos + 6].copy_from_slice(&disp.to_le_bytes());
+    };
+
+    let patch_lea = |pe: &mut [u8], pos: usize, target_rva: u32| {
+        let vaddr = 0x1000 + pos as u32;
+        let disp = (target_rva as i32) - ((vaddr + 7) as i32);
+        pe[text_start + pos + 3..text_start + pos + 7].copy_from_slice(&disp.to_le_bytes());
+    };
+
+    // IAT entries:
+    // 0x2030: GetStdHandle
+    // 0x2038: WriteConsoleA
+    // 0x2040: CreatePipe
+    // 0x2048: WriteFile
+    // 0x2050: ReadFile
+    // 0x2058: CloseHandle
+    // 0x2060: FindFirstFileA
+    // 0x2068: FindClose
+    // 0x2070: ExitProcess
+    patch_call(&mut pe, call_createpipe_pos, 0x2040);
+    patch_call(&mut pe, call_writefile_pos, 0x2048);
+    patch_call(&mut pe, call_readfile_pos, 0x2050);
+    patch_call(&mut pe, call_getstd_pos, 0x2030);
+    patch_call(&mut pe, call_writecon1_pos, 0x2038);
+    patch_call(&mut pe, call_writecon_pipe_pos, 0x2038);
+    patch_call(&mut pe, call_close1_pos, 0x2058);
+    patch_call(&mut pe, call_close2_pos, 0x2058);
+    patch_call(&mut pe, call_findfirst_pos, 0x2060);
+    patch_call(&mut pe, call_findclose_pos, 0x2068);
+    patch_call(&mut pe, call_writecon2_pos, 0x2038);
+    patch_call(&mut pe, call_exit_pos, 0x2070);
+
+    patch_lea(&mut pe, lea_pipe_msg_pos, pipe_rva);
+    patch_lea(&mut pe, lea_banner_pos, banner_rva);
+    patch_lea(&mut pe, lea_search_pos, search_rva);
+    patch_lea(&mut pe, lea_find_msg_pos, find_rva);
 
     pe
 }

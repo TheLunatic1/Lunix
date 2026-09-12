@@ -1,3 +1,4 @@
+use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -5,22 +6,31 @@ use spin::Mutex;
 
 pub const MAX_FD: usize = 64;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FdKind {
+#[derive(Clone)]
+pub enum FdTarget {
     Stdin,
     Stdout,
     Stderr,
-    File,
-    PipeRead,
-    PipeWrite,
+    File {
+        path: String,
+        offset: usize,
+        size: usize,
+        data: Vec<u8>,
+    },
+    Directory {
+        path: String,
+        entries: Vec<crate::fs::file::DirectoryEntry>,
+        current_idx: usize,
+    },
+    PipeRead(Arc<Mutex<crate::task::pipe::PipeBuffer>>),
+    PipeWrite(Arc<Mutex<crate::task::pipe::PipeBuffer>>),
     Socket(usize),
+    VfsHandle(Arc<Mutex<Box<dyn crate::fs::file::FileHandle>>>),
 }
 
 #[derive(Clone)]
 pub struct FileDescriptor {
-    pub kind: FdKind,
-    pub path: String,
-    pub offset: usize,
+    pub target: FdTarget,
     pub flags: u32,
 }
 
@@ -78,21 +88,15 @@ impl Process {
 
     pub fn init_std_fds(&mut self) {
         self.fds[0] = Some(Arc::new(Mutex::new(FileDescriptor {
-            kind: FdKind::Stdin,
-            path: String::from("/dev/stdin"),
-            offset: 0,
+            target: FdTarget::Stdin,
             flags: 0,
         })));
         self.fds[1] = Some(Arc::new(Mutex::new(FileDescriptor {
-            kind: FdKind::Stdout,
-            path: String::from("/dev/stdout"),
-            offset: 0,
+            target: FdTarget::Stdout,
             flags: 0,
         })));
         self.fds[2] = Some(Arc::new(Mutex::new(FileDescriptor {
-            kind: FdKind::Stderr,
-            path: String::from("/dev/stderr"),
-            offset: 0,
+            target: FdTarget::Stderr,
             flags: 0,
         })));
     }
@@ -103,6 +107,16 @@ impl Process {
         for i in 0..MAX_FD {
             if let Some(ref fd) = self.fds[i] {
                 let lock = fd.lock();
+                // Increment pipe reader/writer counts if cloning a pipe FD
+                match lock.target {
+                    FdTarget::PipeRead(ref pipe) => {
+                        pipe.lock().add_reader();
+                    }
+                    FdTarget::PipeWrite(ref pipe) => {
+                        pipe.lock().add_writer();
+                    }
+                    _ => {}
+                }
                 new_proc.fds[i] = Some(Arc::new(Mutex::new(lock.clone())));
             }
         }
@@ -119,6 +133,15 @@ impl Process {
         None
     }
 
+    pub fn allocate_fd_at(&mut self, fd: usize, desc: FileDescriptor) -> bool {
+        if fd >= MAX_FD {
+            return false;
+        }
+        self.close_fd(fd);
+        self.fds[fd] = Some(Arc::new(Mutex::new(desc)));
+        true
+    }
+
     pub fn get_fd(&self, fd: usize) -> Option<Arc<Mutex<FileDescriptor>>> {
         if fd < MAX_FD {
             self.fds[fd].clone()
@@ -129,6 +152,18 @@ impl Process {
 
     pub fn close_fd(&mut self, fd: usize) -> bool {
         if fd < MAX_FD && self.fds[fd].is_some() {
+            if let Some(ref desc_arc) = self.fds[fd] {
+                let desc = desc_arc.lock();
+                match desc.target {
+                    FdTarget::PipeRead(ref pipe) => {
+                        pipe.lock().remove_reader();
+                    }
+                    FdTarget::PipeWrite(ref pipe) => {
+                        pipe.lock().remove_writer();
+                    }
+                    _ => {}
+                }
+            }
             self.fds[fd] = None;
             true
         } else {
@@ -140,13 +175,59 @@ impl Process {
         if oldfd >= MAX_FD || newfd >= MAX_FD {
             return None;
         }
-        if let Some(ref src) = self.fds[oldfd] {
-            let clone = Arc::new(Mutex::new(src.lock().clone()));
-            self.fds[newfd] = Some(clone);
+        let src_opt = if let Some(ref src) = self.fds[oldfd] {
+            let lock = src.lock();
+            match lock.target {
+                FdTarget::PipeRead(ref pipe) => {
+                    pipe.lock().add_reader();
+                }
+                FdTarget::PipeWrite(ref pipe) => {
+                    pipe.lock().add_writer();
+                }
+                _ => {}
+            }
+            Some(lock.clone())
+        } else {
+            None
+        };
+
+        if let Some(desc) = src_opt {
+            self.close_fd(newfd);
+            self.fds[newfd] = Some(Arc::new(Mutex::new(desc)));
             Some(newfd)
         } else {
             None
         }
     }
-}
 
+    pub fn dup_lowest_fd(&mut self, oldfd: usize, min_fd: usize) -> Option<usize> {
+        if oldfd >= MAX_FD || min_fd >= MAX_FD {
+            return None;
+        }
+        let src_opt = if let Some(ref src) = self.fds[oldfd] {
+            let lock = src.lock();
+            match lock.target {
+                FdTarget::PipeRead(ref pipe) => {
+                    pipe.lock().add_reader();
+                }
+                FdTarget::PipeWrite(ref pipe) => {
+                    pipe.lock().add_writer();
+                }
+                _ => {}
+            }
+            Some(lock.clone())
+        } else {
+            None
+        };
+
+        if let Some(desc) = src_opt {
+            for target_fd in min_fd..MAX_FD {
+                if self.fds[target_fd].is_none() {
+                    self.fds[target_fd] = Some(Arc::new(Mutex::new(desc)));
+                    return Some(target_fd);
+                }
+            }
+        }
+        None
+    }
+}

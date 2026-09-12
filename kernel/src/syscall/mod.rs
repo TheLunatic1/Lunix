@@ -1,3 +1,4 @@
+use crate::task::process::FdTarget;
 use crate::{lunix_print, lunix_println};
 use core::slice;
 use spin::Mutex;
@@ -16,6 +17,7 @@ pub const LINUX_SYS_MUNMAP: usize = 11;
 pub const LINUX_SYS_BRK: usize = 12;
 pub const LINUX_SYS_RT_SIGACTION: usize = 13;
 pub const LINUX_SYS_RT_SIGPROCMASK: usize = 14;
+pub const LINUX_SYS_IOCTL: usize = 16;
 pub const LINUX_SYS_PIPE: usize = 22;
 pub const LINUX_SYS_SCHED_YIELD: usize = 24;
 pub const LINUX_SYS_DUP: usize = 32;
@@ -35,6 +37,7 @@ pub const LINUX_SYS_EXECVE: usize = 59;
 pub const LINUX_SYS_EXIT: usize = 60;
 pub const LINUX_SYS_WAIT4: usize = 61;
 pub const LINUX_SYS_UNAME: usize = 63;
+pub const LINUX_SYS_FCNTL: usize = 72;
 pub const LINUX_SYS_GETCWD: usize = 79;
 pub const LINUX_SYS_CHDIR: usize = 80;
 pub const LINUX_SYS_READLINK: usize = 89;
@@ -44,6 +47,7 @@ pub const LINUX_SYS_EXIT_GROUP: usize = 231;
 pub const LINUX_SYS_OPENAT: usize = 257;
 pub const LINUX_SYS_MKDIRAT: usize = 258;
 pub const LINUX_SYS_FSTATAT: usize = 262;
+pub const LINUX_SYS_DUP3: usize = 292;
 pub const LINUX_SYS_PIPE2: usize = 293;
 
 // Win32 User-Mode Subsystem syscall numbers
@@ -67,6 +71,13 @@ pub const WIN32_SYS_CREATEPROCESS: usize = 0x1010;
 pub const WIN32_SYS_WAITFORSINGLEOBJECT: usize = 0x1011;
 pub const WIN32_SYS_GETEXITCODEPROCESS: usize = 0x1012;
 pub const WIN32_SYS_VIRTUALPROTECT: usize = 0x1013;
+pub const WIN32_SYS_CREATEPIPE: usize = 0x1014;
+pub const WIN32_SYS_SETSTDHANDLE: usize = 0x1015;
+pub const WIN32_SYS_CREATEFILE: usize = 0x1016;
+pub const WIN32_SYS_CLOSEHANDLE: usize = 0x1017;
+pub const WIN32_SYS_FINDFIRSTFILE: usize = 0x1018;
+pub const WIN32_SYS_FINDNEXTFILE: usize = 0x1019;
+pub const WIN32_SYS_FINDCLOSE: usize = 0x101A;
 
 static USER_BRK: Mutex<u64> = Mutex::new(0x0000_6000_0000_0000);
 
@@ -87,6 +98,28 @@ pub struct LinuxUtsName {
     pub domainname: [u8; 65],
 }
 
+#[repr(C)]
+pub struct LinuxStat {
+    pub st_dev: u64,
+    pub st_ino: u64,
+    pub st_nlink: u64,
+    pub st_mode: u32,
+    pub st_uid: u32,
+    pub st_gid: u32,
+    pub __pad0: u32,
+    pub st_rdev: u64,
+    pub st_size: i64,
+    pub st_blksize: i64,
+    pub st_blocks: i64,
+    pub st_atime: i64,
+    pub st_atime_nsec: i64,
+    pub st_mtime: i64,
+    pub st_mtime_nsec: i64,
+    pub st_ctime: i64,
+    pub st_ctime_nsec: i64,
+    pub __unused: [i64; 3],
+}
+
 #[no_mangle]
 pub extern "C" fn syscall_dispatcher(
     num: usize,
@@ -97,8 +130,8 @@ pub extern "C" fn syscall_dispatcher(
     arg5: u64,
     _arg6: u64,
 ) -> u64 {
-    crate::lunix_serial_println!("  [SYSCALL_DISPATCH] num=0x{:X}", num);
-    match num {
+    crate::lunix_serial_println!("  [SYSCALL_DISPATCH] num=0x{:X}, a1=0x{:X}, a2=0x{:X}, a3=0x{:X}", num, arg1, arg2, arg3);
+    let ret = match num {
         // Standard Linux syscalls
         LINUX_SYS_READ => sys_read(arg1 as usize, arg2 as *mut u8, arg3 as usize) as u64,
         LINUX_SYS_WRITE => sys_write(arg1 as usize, arg2 as *const u8, arg3 as usize) as u64,
@@ -113,6 +146,7 @@ pub extern "C" fn syscall_dispatcher(
         LINUX_SYS_BRK => sys_brk(arg1),
         LINUX_SYS_RT_SIGACTION => 0, // Signal action set OK
         LINUX_SYS_RT_SIGPROCMASK => 0, // Signal mask set OK
+        LINUX_SYS_IOCTL => sys_ioctl(arg1 as usize, arg2, arg3) as u64,
         LINUX_SYS_PIPE => sys_pipe2(arg1 as *mut [i32; 2], 0) as u64,
         LINUX_SYS_SCHED_YIELD => sys_yield() as u64,
         LINUX_SYS_DUP => sys_dup(arg1 as usize) as u64,
@@ -132,6 +166,7 @@ pub extern "C" fn syscall_dispatcher(
         LINUX_SYS_EXIT => sys_exit(arg1 as i32),
         LINUX_SYS_WAIT4 => sys_wait4(arg1 as isize, arg2 as *mut i32, arg3 as i32) as u64,
         LINUX_SYS_UNAME => sys_uname(arg1 as *mut LinuxUtsName) as u64,
+        LINUX_SYS_FCNTL => sys_fcntl(arg1 as usize, arg2 as usize, arg3) as u64,
         LINUX_SYS_GETCWD => sys_getcwd(arg1 as *mut u8, arg2 as usize) as u64,
         LINUX_SYS_CHDIR => sys_chdir(arg1 as *const u8, arg2 as usize) as u64,
         LINUX_SYS_READLINK => sys_readlink(arg1 as *const u8, arg2 as *mut u8, arg3 as usize) as u64,
@@ -140,7 +175,8 @@ pub extern "C" fn syscall_dispatcher(
         LINUX_SYS_EXIT_GROUP => sys_exit(arg1 as i32),
         LINUX_SYS_OPENAT => sys_openat(arg1 as i32, arg2 as *const u8, arg3 as u32) as u64,
         LINUX_SYS_MKDIRAT => 0,
-        LINUX_SYS_FSTATAT => 0,
+        LINUX_SYS_FSTATAT => sys_fstatat(arg1 as i32, arg2 as *const u8, arg3 as *mut LinuxStat, arg4 as u32) as u64,
+        LINUX_SYS_DUP3 => sys_dup3(arg1 as usize, arg2 as usize, arg3 as i32) as u64,
         LINUX_SYS_PIPE2 => sys_pipe2(arg1 as *mut [i32; 2], arg2 as i32) as u64,
 
         // Win32 User-Mode Subsystem syscalls
@@ -148,7 +184,7 @@ pub extern "C" fn syscall_dispatcher(
             crate::subsystems::nt::win32::sys_win32_get_std_handle(arg1 as i32)
         }
         WIN32_SYS_WRITECONSOLE | WIN32_SYS_WRITEFILE => {
-            crate::subsystems::nt::win32::sys_win32_write_console(
+            crate::subsystems::nt::win32::sys_win32_write_file(
                 arg1,
                 arg2 as *const u8,
                 arg3 as u32,
@@ -218,14 +254,53 @@ pub extern "C" fn syscall_dispatcher(
                 arg4 as *mut u32,
             ) as u64
         }
+        WIN32_SYS_CREATEPIPE => {
+            crate::subsystems::nt::win32::sys_win32_create_pipe(
+                arg1 as *mut u64,
+                arg2 as *mut u64,
+                arg3 as *const u8,
+                arg4 as u32,
+            ) as u64
+        }
+        WIN32_SYS_SETSTDHANDLE => {
+            crate::subsystems::nt::win32::sys_win32_set_std_handle(arg1 as i32, arg2) as u64
+        }
+        WIN32_SYS_CREATEFILE => {
+            crate::subsystems::nt::win32::sys_win32_create_file(
+                arg1 as *const u8,
+                arg2 as u32,
+                arg3 as u32,
+                arg4 as *const u8,
+                arg5 as u32,
+            )
+        }
+        WIN32_SYS_CLOSEHANDLE => {
+            crate::subsystems::nt::win32::sys_win32_close_handle(arg1) as u64
+        }
+        WIN32_SYS_FINDFIRSTFILE => {
+            crate::subsystems::nt::win32::sys_win32_find_first_file(
+                arg1 as *const u8,
+                arg2 as *mut crate::subsystems::nt::win32::Win32FindDataA,
+            )
+        }
+        WIN32_SYS_FINDNEXTFILE => {
+            crate::subsystems::nt::win32::sys_win32_find_next_file(
+                arg1,
+                arg2 as *mut crate::subsystems::nt::win32::Win32FindDataA,
+            ) as u64
+        }
+        WIN32_SYS_FINDCLOSE => {
+            crate::subsystems::nt::win32::sys_win32_find_close(arg1) as u64
+        }
 
         _ => {
             lunix_println!("[SYSCALL] Unimplemented syscall number: {}", num);
             usize::MAX as u64 // -1 (ENOSYS)
         }
-    }
+    };
+    crate::lunix_serial_println!("  [SYSCALL_DISPATCH_RET] num=0x{:X} -> 0x{:X}", num, ret);
+    ret
 }
-
 
 pub fn sys_exit(code: i32) -> ! {
     let pid = crate::task::scheduler::current_pid();
@@ -244,85 +319,240 @@ pub fn sys_getppid() -> isize {
 }
 
 pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> isize {
+    crate::lunix_serial_println!("  [SYS_WRITE] fd={}, len={}", fd, len);
     if buf.is_null() || len == 0 {
         return 0;
     }
 
-    let slice = unsafe { slice::from_raw_parts(buf, len) };
-
-    // Check process FDs first
-    let is_std_out = if let Some(proc_arc) = crate::task::scheduler::get_current_process() {
+    let target_opt = if let Some(proc_arc) = crate::task::scheduler::get_current_process() {
         let proc = proc_arc.lock();
         if let Some(desc_arc) = proc.get_fd(fd) {
             let desc = desc_arc.lock();
-            desc.kind == crate::task::process::FdKind::Stdout || desc.kind == crate::task::process::FdKind::Stderr
+            Some((desc.target.clone(), desc.flags))
         } else {
-            fd == 1 || fd == 2
+            None
         }
     } else {
-        fd == 1 || fd == 2
+        None
     };
 
-    // FDs 1 (stdout) and 2 (stderr)
-    if is_std_out {
+    if let Some((target, flags)) = target_opt {
+        match target {
+            FdTarget::Stdout | FdTarget::Stderr => {
+                let slice = unsafe { slice::from_raw_parts(buf, len) };
+                if let Ok(s) = core::str::from_utf8(slice) {
+                    lunix_print!("{}", s);
+                } else {
+                    for &byte in slice {
+                        lunix_print!("{}", byte as char);
+                    }
+                }
+                return len as isize;
+            }
+            FdTarget::PipeWrite(pipe) => {
+                let non_blocking = (flags & 0x800) != 0;
+                let slice = unsafe { slice::from_raw_parts(buf, len) };
+                for _ in 0..100 {
+                    let write_res = {
+                        pipe.lock().write(slice, non_blocking)
+                    };
+                    match write_res {
+                        Ok(n) => return n as isize,
+                        Err(crate::task::pipe::PipeError::WouldBlock)
+                        | Err(crate::task::pipe::PipeError::BufferFull) => {
+                            if non_blocking {
+                                return -11; // -EAGAIN
+                            }
+                            crate::task::scheduler::sleep_ms(2);
+                        }
+                        Err(crate::task::pipe::PipeError::BrokenPipe) => return -32, // -EPIPE
+                    }
+                }
+                return -32;
+            }
+            FdTarget::File { .. } => {
+                if let Some(proc_arc) = crate::task::scheduler::get_current_process() {
+                    let proc = proc_arc.lock();
+                    if let Some(desc_arc) = proc.get_fd(fd) {
+                        let mut desc = desc_arc.lock();
+                        if let FdTarget::File { ref mut offset, ref mut size, ref mut data, .. } = desc.target {
+                            let slice = unsafe { slice::from_raw_parts(buf, len) };
+                            let needed = *offset + len;
+                            if needed > data.len() {
+                                data.resize(needed, 0);
+                            }
+                            data[*offset..*offset + len].copy_from_slice(slice);
+                            *offset += len;
+                            if *offset > *size {
+                                *size = *offset;
+                            }
+                            return len as isize;
+                        }
+                    }
+                }
+                return -9;
+            }
+            FdTarget::Socket(sid) => {
+                return sys_sendto(sid, buf, len, 0, core::ptr::null());
+            }
+            _ => return -9, // EBADF
+        }
+    }
+
+    // Fallback for FDs 1 (stdout) and 2 (stderr)
+    if fd == 1 || fd == 2 {
+        let slice = unsafe { slice::from_raw_parts(buf, len) };
         if let Ok(s) = core::str::from_utf8(slice) {
             lunix_print!("{}", s);
-            return len as isize;
         } else {
             for &byte in slice {
                 lunix_print!("{}", byte as char);
             }
-            return len as isize;
         }
+        return len as isize;
     }
 
-    -1 // EBADF
+    -9 // EBADF
 }
 
 pub fn sys_read(fd: usize, buf: *mut u8, len: usize) -> isize {
+    crate::lunix_serial_println!("  [SYS_READ] fd={}, len={}", fd, len);
     if buf.is_null() || len == 0 {
         return 0;
     }
 
-    let is_std_in = if let Some(proc_arc) = crate::task::scheduler::get_current_process() {
+    let target_opt = if let Some(proc_arc) = crate::task::scheduler::get_current_process() {
         let proc = proc_arc.lock();
         if let Some(desc_arc) = proc.get_fd(fd) {
             let desc = desc_arc.lock();
-            desc.kind == crate::task::process::FdKind::Stdin
+            Some((desc.target.clone(), desc.flags))
         } else {
-            fd == 0
+            None
         }
     } else {
-        fd == 0
+        None
     };
 
-    if is_std_in {
-        // Stdin: non-blocking or single byte
+    if let Some((target, flags)) = target_opt {
+        match target {
+            FdTarget::Stdin => {
+                let slice = unsafe { slice::from_raw_parts_mut(buf, len) };
+                slice[0] = 0;
+                return 1;
+            }
+            FdTarget::PipeRead(pipe) => {
+                let non_blocking = (flags & 0x800) != 0;
+                let slice = unsafe { slice::from_raw_parts_mut(buf, len) };
+                for _ in 0..100 {
+                    let read_res = {
+                        pipe.lock().read(slice, non_blocking)
+                    };
+                    match read_res {
+                        Ok(n) => return n as isize,
+                        Err(crate::task::pipe::PipeError::WouldBlock) => {
+                            if non_blocking {
+                                return -11; // -EAGAIN
+                            }
+                            crate::task::scheduler::sleep_ms(2);
+                        }
+                        Err(crate::task::pipe::PipeError::BrokenPipe) => return 0, // EOF
+                        Err(crate::task::pipe::PipeError::BufferFull) => return 0,
+                    }
+                }
+                return 0;
+            }
+            FdTarget::File { .. } => {
+                if let Some(proc_arc) = crate::task::scheduler::get_current_process() {
+                    let proc = proc_arc.lock();
+                    if let Some(desc_arc) = proc.get_fd(fd) {
+                        let mut desc = desc_arc.lock();
+                        if let FdTarget::File { ref mut offset, size, ref data, .. } = desc.target {
+                            if *offset >= size {
+                                return 0; // EOF
+                            }
+                            let avail = size - *offset;
+                            let to_read = len.min(avail);
+                            let slice = unsafe { slice::from_raw_parts_mut(buf, len) };
+                            slice[..to_read].copy_from_slice(&data[*offset..*offset + to_read]);
+                            *offset += to_read;
+                            return to_read as isize;
+                        }
+                    }
+                }
+                return -9;
+            }
+            FdTarget::Socket(sid) => {
+                return sys_recvfrom(sid, buf, len);
+            }
+            FdTarget::Directory { .. } => {
+                return -21; // -EISDIR
+            }
+            _ => return -9, // EBADF
+        }
+    }
+
+    if fd == 0 {
         let slice = unsafe { slice::from_raw_parts_mut(buf, len) };
         slice[0] = 0;
         return 1;
     }
 
-    -1
+    -9 // EBADF
 }
 
-pub fn sys_open(path_ptr: *const u8, path_len: usize, _flags: u32) -> isize {
+pub fn sys_open(path_ptr: *const u8, path_len: usize, flags: u32) -> isize {
     if path_ptr.is_null() || path_len == 0 {
         return -1;
     }
 
     let slice = unsafe { slice::from_raw_parts(path_ptr, path_len) };
     if let Ok(path) = core::str::from_utf8(slice) {
-        if let Ok(_node) = crate::fs::vfs::open(path) {
-            return 3; // Assigned FD
+        if let Some(proc_arc) = crate::task::scheduler::get_current_process() {
+            let mut proc = proc_arc.lock();
+            // Check if directory
+            if let Ok(entries) = crate::fs::vfs::read_dir(path) {
+                if let Some(fd) = proc.allocate_fd(crate::task::process::FileDescriptor {
+                    target: FdTarget::Directory {
+                        path: alloc::string::String::from(path),
+                        entries,
+                        current_idx: 0,
+                    },
+                    flags,
+                }) {
+                    return fd as isize;
+                }
+            } else if let Ok(data) = crate::fs::vfs::read_to_vec(path) {
+                let size = data.len();
+                if let Some(fd) = proc.allocate_fd(crate::task::process::FileDescriptor {
+                    target: FdTarget::File {
+                        path: alloc::string::String::from(path),
+                        offset: 0,
+                        size,
+                        data,
+                    },
+                    flags,
+                }) {
+                    return fd as isize;
+                }
+            }
         }
     }
 
-    -1
+    -2 // -ENOENT
 }
 
-pub fn sys_close(_fd: usize) -> isize {
-    0
+pub fn sys_close(fd: usize) -> isize {
+    crate::lunix_serial_println!("  [SYS_CLOSE] fd={}", fd);
+    if let Some(proc_arc) = crate::task::scheduler::get_current_process() {
+        let mut proc = proc_arc.lock();
+        if proc.close_fd(fd) {
+            0
+        } else {
+            -9 // -EBADF
+        }
+    } else {
+        0
+    }
 }
 
 pub fn sys_stat(path_ptr: *const u8, path_len: usize) -> isize {
@@ -337,7 +567,7 @@ pub fn sys_stat(path_ptr: *const u8, path_len: usize) -> isize {
         }
     }
 
-    -1
+    -2 // -ENOENT
 }
 
 pub fn sys_mmap(addr: u64, length: u64, _prot: u32, _flags: u32) -> u64 {
@@ -448,6 +678,116 @@ fn copy_cstr(dest: &mut [u8; 65], src: &[u8]) {
     dest[src.len().min(64)] = 0;
 }
 
+pub fn sys_ioctl(fd: usize, request: u64, arg: u64) -> isize {
+    const TIOCGWINSZ: u64 = 0x5413;
+    const TCGETS: u64 = 0x5401;
+    const TCSETS: u64 = 0x5402;
+    const TCSETSW: u64 = 0x5403;
+    const TCSETSF: u64 = 0x5404;
+    const FIONBIO: u64 = 0x5421;
+
+    match request {
+        TIOCGWINSZ => {
+            if arg == 0 {
+                return -14; // -EFAULT
+            }
+            #[repr(C)]
+            struct WinSize {
+                ws_row: u16,
+                ws_col: u16,
+                ws_xpixel: u16,
+                ws_ypixel: u16,
+            }
+            unsafe {
+                let ws = &mut *(arg as *mut WinSize);
+                ws.ws_row = 25;
+                ws.ws_col = 80;
+                ws.ws_xpixel = 640;
+                ws.ws_ypixel = 400;
+            }
+            0
+        }
+        TCGETS | TCSETS | TCSETSW | TCSETSF => 0,
+        FIONBIO => {
+            if arg != 0 {
+                let val = unsafe { *(arg as *const i32) };
+                if let Some(proc_arc) = crate::task::scheduler::get_current_process() {
+                    let proc = proc_arc.lock();
+                    if let Some(desc_arc) = proc.get_fd(fd) {
+                        let mut desc = desc_arc.lock();
+                        if val != 0 {
+                            desc.flags |= 0x800; // O_NONBLOCK
+                        } else {
+                            desc.flags &= !0x800;
+                        }
+                    }
+                }
+            }
+            0
+        }
+        _ => 0,
+    }
+}
+
+pub fn sys_fcntl(fd: usize, cmd: usize, arg: u64) -> isize {
+    const F_DUPFD: usize = 0;
+    const F_GETFD: usize = 1;
+    const F_SETFD: usize = 2;
+    const F_GETFL: usize = 3;
+    const F_SETFL: usize = 4;
+    const F_DUPFD_CLOEXEC: usize = 1030;
+
+    if let Some(proc_arc) = crate::task::scheduler::get_current_process() {
+        let mut proc = proc_arc.lock();
+        match cmd {
+            F_DUPFD | F_DUPFD_CLOEXEC => {
+                if let Some(newfd) = proc.dup_lowest_fd(fd, arg as usize) {
+                    newfd as isize
+                } else {
+                    -9 // -EBADF
+                }
+            }
+            F_GETFD => {
+                if let Some(desc_arc) = proc.get_fd(fd) {
+                    let desc = desc_arc.lock();
+                    (desc.flags & 1) as isize // FD_CLOEXEC
+                } else {
+                    -9
+                }
+            }
+            F_SETFD => {
+                if let Some(desc_arc) = proc.get_fd(fd) {
+                    let mut desc = desc_arc.lock();
+                    desc.flags = (desc.flags & !1) | (arg as u32 & 1);
+                    0
+                } else {
+                    -9
+                }
+            }
+            F_GETFL => {
+                if let Some(desc_arc) = proc.get_fd(fd) {
+                    let desc = desc_arc.lock();
+                    desc.flags as isize
+                } else {
+                    -9
+                }
+            }
+            F_SETFL => {
+                if let Some(desc_arc) = proc.get_fd(fd) {
+                    let mut desc = desc_arc.lock();
+                    desc.flags = arg as u32;
+                    0
+                } else {
+                    -9
+                }
+            }
+            _ => 0,
+        }
+    } else {
+        -1
+    }
+}
+
 pub fn sys_getcwd(buf: *mut u8, size: usize) -> isize {
     if buf.is_null() || size < 2 {
         return -1;
@@ -537,21 +877,39 @@ pub struct LinuxDirent64 {
     pub d_type: u8,
 }
 
-pub fn sys_getdents64(_fd: usize, dirp: *mut u8, count: usize) -> isize {
+pub fn sys_getdents64(fd: usize, dirp: *mut u8, count: usize) -> isize {
     if dirp.is_null() || count < 32 {
         return 0;
     }
 
-    let cwd = crate::drivers::keyboard::get_cwd();
-    let entries = match crate::fs::vfs::read_dir(&cwd) {
-        Ok(e) => e,
-        Err(_) => return -1,
+    let (entries, start_idx) = if let Some(proc_arc) = crate::task::scheduler::get_current_process() {
+        let proc = proc_arc.lock();
+        if let Some(desc_arc) = proc.get_fd(fd) {
+            let desc = desc_arc.lock();
+            if let FdTarget::Directory { ref entries, current_idx, .. } = desc.target {
+                (entries.clone(), current_idx)
+            } else {
+                let cwd = crate::drivers::keyboard::get_cwd();
+                (crate::fs::vfs::read_dir(&cwd).unwrap_or_default(), 0)
+            }
+        } else {
+            let cwd = crate::drivers::keyboard::get_cwd();
+            (crate::fs::vfs::read_dir(&cwd).unwrap_or_default(), 0)
+        }
+    } else {
+        let cwd = crate::drivers::keyboard::get_cwd();
+        (crate::fs::vfs::read_dir(&cwd).unwrap_or_default(), 0)
     };
 
-    let mut written = 0;
-    let mut offset = 1;
+    if start_idx >= entries.len() {
+        return 0; // EOF
+    }
 
-    for entry in entries {
+    let mut written = 0;
+    let mut idx = start_idx;
+
+    while idx < entries.len() {
+        let entry = &entries[idx];
         let name_bytes = entry.name.as_bytes();
         let name_len = name_bytes.len();
         // Calculate record length: 19 bytes header + name_len + 1 null + padding to 8-byte alignment
@@ -575,9 +933,9 @@ pub fn sys_getdents64(_fd: usize, dirp: *mut u8, count: usize) -> isize {
             core::ptr::write_bytes(out_ptr, 0, reclen as usize);
 
             // d_ino (8 bytes)
-            *(out_ptr as *mut u64) = offset as u64;
+            *(out_ptr as *mut u64) = (idx + 1) as u64;
             // d_off (8 bytes)
-            *(out_ptr.add(8) as *mut i64) = offset as i64;
+            *(out_ptr.add(8) as *mut i64) = (idx + 1) as i64;
             // d_reclen (2 bytes)
             *(out_ptr.add(16) as *mut u16) = reclen;
             // d_type (1 byte)
@@ -588,7 +946,17 @@ pub fn sys_getdents64(_fd: usize, dirp: *mut u8, count: usize) -> isize {
         }
 
         written += reclen as usize;
-        offset += 1;
+        idx += 1;
+    }
+
+    if let Some(proc_arc) = crate::task::scheduler::get_current_process() {
+        let proc = proc_arc.lock();
+        if let Some(desc_arc) = proc.get_fd(fd) {
+            let mut desc = desc_arc.lock();
+            if let FdTarget::Directory { ref mut current_idx, .. } = desc.target {
+                *current_idx = idx;
+            }
+        }
     }
 
     written as isize
@@ -656,8 +1024,6 @@ pub fn sys_clone(_flags: u64, stack: u64) -> isize {
     child_pid as isize
 }
 
-
-
 pub fn sys_wait4(pid: isize, status_ptr: *mut i32, _options: i32) -> isize {
     let parent_pid = crate::task::scheduler::current_pid();
 
@@ -681,8 +1047,7 @@ pub fn sys_wait4(pid: isize, status_ptr: *mut i32, _options: i32) -> isize {
     if pid > 0 { pid } else { 1 }
 }
 
-
-pub fn sys_openat(_dfd: i32, filename_ptr: *const u8, flags: u32) -> isize {
+pub fn sys_openat(dfd: i32, filename_ptr: *const u8, flags: u32) -> isize {
     if filename_ptr.is_null() {
         return -1;
     }
@@ -692,7 +1057,89 @@ pub fn sys_openat(_dfd: i32, filename_ptr: *const u8, flags: u32) -> isize {
             len += 1;
         }
     }
-    sys_open(filename_ptr, len, flags)
+    let slice = unsafe { core::slice::from_raw_parts(filename_ptr, len) };
+    let path = match core::str::from_utf8(slice) {
+        Ok(p) => p,
+        Err(_) => return -1,
+    };
+
+    let resolved_path = if path.starts_with('/') || dfd == -100 {
+        alloc::string::String::from(path)
+    } else {
+        let mut full = alloc::string::String::from("/");
+        full.push_str(path);
+        full
+    };
+
+    if let Some(proc_arc) = crate::task::scheduler::get_current_process() {
+        let mut proc = proc_arc.lock();
+        if let Ok(entries) = crate::fs::vfs::read_dir(&resolved_path) {
+            if let Some(fd) = proc.allocate_fd(crate::task::process::FileDescriptor {
+                target: FdTarget::Directory {
+                    path: resolved_path,
+                    entries,
+                    current_idx: 0,
+                },
+                flags,
+            }) {
+                return fd as isize;
+            }
+        } else if let Ok(data) = crate::fs::vfs::read_to_vec(&resolved_path) {
+            let size = data.len();
+            if let Some(fd) = proc.allocate_fd(crate::task::process::FileDescriptor {
+                target: FdTarget::File {
+                    path: resolved_path,
+                    offset: 0,
+                    size,
+                    data,
+                },
+                flags,
+            }) {
+                return fd as isize;
+            }
+        }
+    }
+
+    -2 // -ENOENT
+}
+
+pub fn sys_fstatat(_dfd: i32, filename_ptr: *const u8, statbuf: *mut LinuxStat, _flags: u32) -> isize {
+    if filename_ptr.is_null() || statbuf.is_null() {
+        return -1;
+    }
+    let mut len = 0;
+    unsafe {
+        while *filename_ptr.add(len) != 0 && len < 256 {
+            len += 1;
+        }
+    }
+    let slice = unsafe { core::slice::from_raw_parts(filename_ptr, len) };
+    if let Ok(path) = core::str::from_utf8(slice) {
+        if let Ok(inode) = crate::fs::vfs::stat(path) {
+            unsafe {
+                let st = &mut *statbuf;
+                st.st_dev = 1;
+                st.st_ino = inode.id;
+                st.st_nlink = 1;
+                st.st_mode = if inode.node_type == crate::fs::inode::INodeType::Directory {
+                    0o040755 // S_IFDIR | 0755
+                } else {
+                    0o100755 // S_IFREG | 0755
+                };
+                st.st_uid = 0;
+                st.st_gid = 0;
+                st.st_rdev = 0;
+                st.st_size = inode.size as i64;
+                st.st_blksize = 512;
+                st.st_blocks = (inode.size as i64 + 511) / 512;
+                st.st_atime = 1726000000;
+                st.st_mtime = 1726000000;
+                st.st_ctime = 1726000000;
+            }
+            return 0;
+        }
+    }
+    -2 // -ENOENT
 }
 
 pub fn sys_readlink(path_ptr: *const u8, buf: *mut u8, bufsiz: usize) -> isize {
@@ -702,23 +1149,86 @@ pub fn sys_readlink(path_ptr: *const u8, buf: *mut u8, bufsiz: usize) -> isize {
     -1 // EINVAL (not a symlink)
 }
 
-pub fn sys_pipe2(pipefd_ptr: *mut [i32; 2], _flags: i32) -> isize {
+pub fn sys_pipe2(pipefd_ptr: *mut [i32; 2], flags: i32) -> isize {
     if pipefd_ptr.is_null() {
-        return -1;
+        return -1; // EFAULT
     }
-    unsafe {
-        (*pipefd_ptr)[0] = 3; // Reader
-        (*pipefd_ptr)[1] = 4; // Writer
+    let (reader, writer) = crate::task::pipe::create_pipe_pair();
+    if let Some(proc_arc) = crate::task::scheduler::get_current_process() {
+        let mut proc = proc_arc.lock();
+        let read_fd = match proc.allocate_fd(crate::task::process::FileDescriptor {
+            target: FdTarget::PipeRead(reader),
+            flags: flags as u32,
+        }) {
+            Some(fd) => fd,
+            None => return -24, // EMFILE
+        };
+        let write_fd = match proc.allocate_fd(crate::task::process::FileDescriptor {
+            target: FdTarget::PipeWrite(writer),
+            flags: flags as u32,
+        }) {
+            Some(fd) => fd,
+            None => {
+                proc.close_fd(read_fd);
+                return -24; // EMFILE
+            }
+        };
+        unsafe {
+            (*pipefd_ptr)[0] = read_fd as i32;
+            (*pipefd_ptr)[1] = write_fd as i32;
+        }
+        crate::lunix_serial_println!("  [SYS_PIPE2] read_fd={}, write_fd={}", read_fd, write_fd);
+        0
+    } else {
+        -1
     }
-    0
 }
 
 pub fn sys_dup(oldfd: usize) -> isize {
-    (oldfd + 1) as isize
+    if let Some(proc_arc) = crate::task::scheduler::get_current_process() {
+        let mut proc = proc_arc.lock();
+        if let Some(newfd) = proc.dup_lowest_fd(oldfd, 0) {
+            newfd as isize
+        } else {
+            -9 // -EBADF
+        }
+    } else {
+        -1
+    }
 }
 
-pub fn sys_dup2(_oldfd: usize, newfd: usize) -> isize {
-    newfd as isize
+pub fn sys_dup2(oldfd: usize, newfd: usize) -> isize {
+    if let Some(proc_arc) = crate::task::scheduler::get_current_process() {
+        let mut proc = proc_arc.lock();
+        if oldfd == newfd {
+            if proc.get_fd(oldfd).is_some() {
+                return newfd as isize;
+            } else {
+                return -9; // -EBADF
+            }
+        }
+        if let Some(fd) = proc.dup_fd(oldfd, newfd) {
+            fd as isize
+        } else {
+            -9 // -EBADF
+        }
+    } else {
+        -1
+    }
 }
 
-
+pub fn sys_dup3(oldfd: usize, newfd: usize, flags: i32) -> isize {
+    if oldfd == newfd {
+        return -22; // -EINVAL
+    }
+    let res = sys_dup2(oldfd, newfd);
+    if res >= 0 && flags != 0 {
+        if let Some(proc_arc) = crate::task::scheduler::get_current_process() {
+            let proc = proc_arc.lock();
+            if let Some(desc_arc) = proc.get_fd(newfd) {
+                desc_arc.lock().flags = flags as u32;
+            }
+        }
+    }
+    res
+}
