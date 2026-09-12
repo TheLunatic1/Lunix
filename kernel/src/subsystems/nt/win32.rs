@@ -37,6 +37,37 @@ pub struct SystemInfo {
     pub processor_revision: u16,
 }
 
+// Win32 Process Information & Startup Info
+#[repr(C)]
+pub struct ProcessInformation {
+    pub h_process: u64,
+    pub h_thread: u64,
+    pub dw_process_id: u32,
+    pub dw_thread_id: u32,
+}
+
+#[repr(C)]
+pub struct StartupInfoA {
+    pub cb: u32,
+    pub lp_reserved: *const u8,
+    pub lp_desktop: *const u8,
+    pub lp_title: *const u8,
+    pub dw_x: u32,
+    pub dw_y: u32,
+    pub dw_x_size: u32,
+    pub dw_y_size: u32,
+    pub dw_x_count_chars: u32,
+    pub dw_y_count_chars: u32,
+    pub dw_fill_attribute: u32,
+    pub dw_flags: u32,
+    pub w_show_window: u16,
+    pub cb_reserved2: u16,
+    pub lp_reserved2: *const u8,
+    pub h_std_input: u64,
+    pub h_std_output: u64,
+    pub h_std_error: u64,
+}
+
 static WIN32_USER_HEAP: Mutex<u64> = Mutex::new(0x0000_7000_0000_0000);
 static WIN32_CMDLINE: Mutex<String> = Mutex::new(String::new());
 
@@ -59,6 +90,10 @@ pub const THUNK_GET_CURRENT_THREAD_ID: usize = 12 * 32;
 pub const THUNK_SLEEP: usize = 13 * 32;
 pub const THUNK_GET_COMMAND_LINE_A: usize = 14 * 32;
 pub const THUNK_GET_MODULE_HANDLE_A: usize = 15 * 32;
+pub const THUNK_CREATE_PROCESS_A: usize = 16 * 32;
+pub const THUNK_WAIT_FOR_SINGLE_OBJECT: usize = 17 * 32;
+pub const THUNK_GET_EXIT_CODE_PROCESS: usize = 18 * 32;
+pub const THUNK_VIRTUAL_PROTECT: usize = 19 * 32;
 
 fn emit_win32_thunk(buf: &mut [u8; 4096], offset: usize, syscall_id: u32) {
     // Generates a 64-bit user-mode thunk stub translating Win64 calling convention to Syscall ABI:
@@ -83,6 +118,7 @@ fn emit_win32_thunk(buf: &mut [u8; 4096], offset: usize, syscall_id: u32) {
 
     buf[offset..offset + code.len()].copy_from_slice(&code);
 }
+
 
 // -----------------------------------------------------------------------------
 // Win32 Kernel-Side Syscall Implementations
@@ -218,6 +254,102 @@ pub fn sys_win32_get_command_line() -> u64 {
     cmd.as_ptr() as u64
 }
 
+
+pub fn sys_win32_create_process(
+    lp_app_name: *const u8,
+    lp_cmd_line: *const u8,
+    lp_proc_info: *mut ProcessInformation,
+) -> u32 {
+    let app_str = if !lp_app_name.is_null() {
+        let mut len = 0;
+        unsafe {
+            while *lp_app_name.add(len) != 0 && len < 256 {
+                len += 1;
+            }
+            core::str::from_utf8(core::slice::from_raw_parts(lp_app_name, len)).unwrap_or("")
+        }
+    } else if !lp_cmd_line.is_null() {
+        let mut len = 0;
+        unsafe {
+            while *lp_cmd_line.add(len) != 0 && len < 256 {
+                len += 1;
+            }
+            core::str::from_utf8(core::slice::from_raw_parts(lp_cmd_line, len)).unwrap_or("")
+        }
+    } else {
+        return 0; // FALSE
+    };
+
+    match exec_win32_pe(app_str) {
+        Ok(tid) => {
+            if !lp_proc_info.is_null() {
+                unsafe {
+                    let info = &mut *lp_proc_info;
+                    info.h_process = tid as u64;
+                    info.h_thread = tid as u64;
+                    info.dw_process_id = tid as u32;
+                    info.dw_thread_id = tid as u32;
+                }
+            }
+            1 // TRUE
+        }
+        Err(_) => 0, // FALSE
+    }
+}
+
+pub fn sys_win32_wait_for_single_object(h_handle: u64, _dw_milliseconds: u32) -> u32 {
+    let target_tid = h_handle as usize;
+    // Loop until thread terminates or is dead
+    for _ in 0..100 {
+        let is_dead = {
+            let threads = scheduler::list_threads();
+            if let Some((_, _, state, _)) = threads.iter().find(|(tid, _, _, _)| *tid == target_tid) {
+                *state == crate::task::thread::ThreadState::Dead
+            } else {
+                true // Process already reaped
+            }
+        };
+
+        if is_dead {
+            return 0; // WAIT_OBJECT_0
+        }
+        scheduler::sleep_ms(10);
+    }
+    0 // WAIT_OBJECT_0
+}
+
+pub fn sys_win32_get_exit_code_process(h_process: u64, lp_exit_code: *mut u32) -> u32 {
+    let pid = h_process as usize;
+    if !lp_exit_code.is_null() {
+        if let Some(proc_arc) = scheduler::get_process(pid) {
+            let proc = proc_arc.lock();
+            let code = proc.exit_code.unwrap_or(0) as u32;
+            unsafe {
+                *lp_exit_code = code;
+            }
+        } else {
+            unsafe {
+                *lp_exit_code = 0;
+            }
+        }
+    }
+    1 // TRUE
+}
+
+pub fn sys_win32_virtual_protect(
+    _lp_address: u64,
+    _dw_size: usize,
+    _fl_new_protect: u32,
+    lpfl_old_protect: *mut u32,
+) -> u32 {
+    if !lpfl_old_protect.is_null() {
+        unsafe {
+            *lpfl_old_protect = 0x04; // PAGE_READWRITE
+        }
+    }
+    1 // TRUE
+}
+
 // -----------------------------------------------------------------------------
 // Win32 Symbol Resolver (maps imports to user-mode VDSO thunk entry points)
 // -----------------------------------------------------------------------------
@@ -225,7 +357,9 @@ pub fn sys_win32_get_command_line() -> u64 {
 pub fn resolve_win32_symbol(dll: &str, symbol: &str) -> Option<usize> {
     let is_kernel32 = dll.eq_ignore_ascii_case("kernel32.dll")
         || dll.eq_ignore_ascii_case("kernel32")
-        || dll.eq_ignore_ascii_case("api-ms-win-core-processenvironment-l1-1-0.dll");
+        || dll.eq_ignore_ascii_case("api-ms-win-core-processenvironment-l1-1-0.dll")
+        || dll.eq_ignore_ascii_case("api-ms-win-core-processthreads-l1-1-0.dll")
+        || dll.eq_ignore_ascii_case("api-ms-win-core-memory-l1-1-0.dll");
 
     let is_ntdll = dll.eq_ignore_ascii_case("ntdll.dll") || dll.eq_ignore_ascii_case("ntdll");
 
@@ -239,14 +373,18 @@ pub fn resolve_win32_symbol(dll: &str, symbol: &str) -> Option<usize> {
             "GetProcessHeap" => Some((WIN32_VDSO_BASE as usize) + THUNK_GET_PROCESS_HEAP),
             "HeapAlloc" => Some((WIN32_VDSO_BASE as usize) + THUNK_HEAP_ALLOC),
             "HeapFree" => Some((WIN32_VDSO_BASE as usize) + THUNK_HEAP_FREE),
-            "VirtualAlloc" => Some((WIN32_VDSO_BASE as usize) + THUNK_VIRTUAL_ALLOC),
-            "VirtualFree" => Some((WIN32_VDSO_BASE as usize) + THUNK_VIRTUAL_FREE),
+            "VirtualAlloc" | "VirtualAllocEx" => Some((WIN32_VDSO_BASE as usize) + THUNK_VIRTUAL_ALLOC),
+            "VirtualFree" | "VirtualFreeEx" => Some((WIN32_VDSO_BASE as usize) + THUNK_VIRTUAL_FREE),
+            "VirtualProtect" | "VirtualProtectEx" => Some((WIN32_VDSO_BASE as usize) + THUNK_VIRTUAL_PROTECT),
             "GetSystemInfo" => Some((WIN32_VDSO_BASE as usize) + THUNK_GET_SYSTEM_INFO),
             "GetCurrentProcessId" => Some((WIN32_VDSO_BASE as usize) + THUNK_GET_CURRENT_PROCESS_ID),
             "GetCurrentThreadId" => Some((WIN32_VDSO_BASE as usize) + THUNK_GET_CURRENT_THREAD_ID),
             "Sleep" => Some((WIN32_VDSO_BASE as usize) + THUNK_SLEEP),
             "GetCommandLineA" => Some((WIN32_VDSO_BASE as usize) + THUNK_GET_COMMAND_LINE_A),
             "GetModuleHandleA" => Some((WIN32_VDSO_BASE as usize) + THUNK_GET_MODULE_HANDLE_A),
+            "CreateProcessA" => Some((WIN32_VDSO_BASE as usize) + THUNK_CREATE_PROCESS_A),
+            "WaitForSingleObject" => Some((WIN32_VDSO_BASE as usize) + THUNK_WAIT_FOR_SINGLE_OBJECT),
+            "GetExitCodeProcess" => Some((WIN32_VDSO_BASE as usize) + THUNK_GET_EXIT_CODE_PROCESS),
             "RtlAllocateHeap" => Some((WIN32_VDSO_BASE as usize) + THUNK_HEAP_ALLOC),
             "RtlFreeHeap" => Some((WIN32_VDSO_BASE as usize) + THUNK_HEAP_FREE),
             "RtlExitUserProcess" => Some((WIN32_VDSO_BASE as usize) + THUNK_EXIT_PROCESS),
@@ -259,6 +397,7 @@ pub fn resolve_win32_symbol(dll: &str, symbol: &str) -> Option<usize> {
         None
     }
 }
+
 
 // -----------------------------------------------------------------------------
 // Win32 PE32+ User Executable Loader & Runner
@@ -438,6 +577,10 @@ pub fn load_win32_exe(data: &[u8]) -> Result<Win32Process, &'static str> {
         emit_win32_thunk(&mut vdso_buf, THUNK_SLEEP, 0x100D);
         emit_win32_thunk(&mut vdso_buf, THUNK_GET_COMMAND_LINE_A, 0x100E);
         emit_win32_thunk(&mut vdso_buf, THUNK_GET_MODULE_HANDLE_A, 0x100F);
+        emit_win32_thunk(&mut vdso_buf, THUNK_CREATE_PROCESS_A, 0x1010);
+        emit_win32_thunk(&mut vdso_buf, THUNK_WAIT_FOR_SINGLE_OBJECT, 0x1011);
+        emit_win32_thunk(&mut vdso_buf, THUNK_GET_EXIT_CODE_PROCESS, 0x1012);
+        emit_win32_thunk(&mut vdso_buf, THUNK_VIRTUAL_PROTECT, 0x1013);
 
         unsafe {
             core::ptr::copy_nonoverlapping(
@@ -544,7 +687,20 @@ pub fn exec_win32_pe(path: &str) -> Result<usize, &'static str> {
 
     *CURRENT_WIN32_EXEC.lock() = Some(process);
 
-    lunix_println!("[+] Starting Windows process '{}' (PE32+)...", path);
-    let tid = scheduler::spawn("win32_app", win32_runner_trampoline, 6);
+    let pid = scheduler::allocate_pid();
+    let (cr3_frame, _) = x86_64::registers::control::Cr3::read();
+    let ppid = scheduler::current_pid();
+    let proc = crate::task::process::Process::new_user(pid, ppid, path, cr3_frame.start_address().as_u64());
+    scheduler::register_process(proc);
+
+    if ppid != pid {
+        if let Some(parent_proc) = scheduler::get_process(ppid) {
+            parent_proc.lock().children.push(pid);
+        }
+    }
+
+    lunix_println!("[+] Starting Windows process '{}' (PID: {}, PPID: {})...", path, pid, ppid);
+    let tid = scheduler::spawn_with_pid("win32_app", pid, win32_runner_trampoline, 6);
     Ok(tid)
 }
+

@@ -13,6 +13,8 @@ static mut SYSCALL_STACK: SyscallStack = SyscallStack([0; 16384]);
 
 static mut USER_RSP_SCRATCH: u64 = 0;
 static mut KERNEL_RSP_SCRATCH: u64 = 0;
+pub static LAST_USER_RIP: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+pub static LAST_USER_RSP: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 pub fn init() {
     unsafe {
@@ -49,7 +51,10 @@ pub unsafe extern "C" fn syscall_entry() {
     core::arch::naked_asm!(
         // Save user RSP into scratch and switch to kernel stack
         "mov [rip + {user_rsp}], rsp",
+        "mov [rip + {last_user_rsp}], rsp",
+        "mov [rip + {last_user_rip}], rcx",
         "mov rsp, [rip + {kernel_rsp}]",
+
 
         // Save User context on kernel stack:
         "push qword ptr [rip + {user_rsp}]", // [rsp + 80] = User RSP
@@ -99,6 +104,9 @@ pub unsafe extern "C" fn syscall_entry() {
 
         user_rsp = sym USER_RSP_SCRATCH,
         kernel_rsp = sym KERNEL_RSP_SCRATCH,
+        last_user_rsp = sym LAST_USER_RSP,
+        last_user_rip = sym LAST_USER_RIP,
         dispatcher = sym crate::syscall::syscall_dispatcher,
     );
 }
+

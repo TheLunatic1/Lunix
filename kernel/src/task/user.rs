@@ -16,6 +16,8 @@ pub unsafe extern "C" fn enter_user_mode(entry_rip: u64, user_rsp: u64) -> ! {
         "mov fs, ax",
         "mov gs, ax",
 
+        "xor rax, rax",        // Set RAX to 0
+
         // Push iretq stack frame:
         // [rsp + 32] = SS (User Data)
         // [rsp + 24] = RSP (User Stack)
@@ -32,3 +34,36 @@ pub unsafe extern "C" fn enter_user_mode(entry_rip: u64, user_rsp: u64) -> ! {
         "iretq",
     );
 }
+
+
+/// Jumps into Ring 3 user space at entry_rip with user_rsp and sets RAX to rax_val.
+#[unsafe(naked)]
+pub unsafe extern "C" fn enter_user_mode_with_rax(entry_rip: u64, user_rsp: u64, rax_val: u64) -> ! {
+    core::arch::naked_asm!(
+        // rdi = entry_rip, rsi = user_rsp, rdx = rax_val
+        // Set DS/ES/FS/GS to User Data selector
+        "mov ax, 0x1B",
+        "mov ds, ax",
+        "mov es, ax",
+        "mov fs, ax",
+        "mov gs, ax",
+
+        "mov rax, rdx",        // Set RAX
+
+        // Push iretq stack frame:
+        // [rsp + 32] = SS (User Data)
+        // [rsp + 24] = RSP (User Stack)
+        // [rsp + 16] = RFLAGS
+        // [rsp + 8]  = CS (User Code)
+        // [rsp + 0]  = RIP (Entry Point)
+        "push 0x1B",           // User SS
+        "push rsi",            // User RSP
+        "push 0x202",          // RFLAGS (IF=1)
+        "push 0x23",           // User CS
+        "push rdi",            // User RIP
+
+        // Transition from Ring 0 to Ring 3
+        "iretq",
+    );
+}
+

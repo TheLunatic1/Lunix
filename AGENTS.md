@@ -270,3 +270,12 @@ The kernel boots into an interactive graphical console with an IBM VGA font disp
 - **Dedicated QEMU Chardev Stream**: Uses `-chardev stdio,id=char0,mux=off -serial chardev:char0` for un-multiplexed raw stdio piping.
 - **Host-Side Stdin Stream Forwarder**: `xtask` orchestrator pipes stdin via anonymous pipe with micro-pacing, eliminating Windows Console `KEY_EVENT` collisions and ensuring 100% paste fidelity across arbitrary length inputs.
 
+### Phase 13: Milestone 1 — Process Hierarchy & Universal Execution Engine
+- **Process Hierarchy & Tracking**: Extended `Process` with parent PID (`ppid`), child PID lists, termination status (`exit_code`), and active states (`is_alive`). Managed via thread-safe global `PROCESS_TABLE`.
+- **Per-Process Standard File Descriptors**: Every created user process initializes FD 0 (`/dev/stdin`), FD 1 (`/dev/stdout`), and FD 2 (`/dev/stderr`), routing stream I/O through `Process::fds`.
+- **Linux Fork & Clone Engine**: `sys_clone` (56) / `sys_fork` (57) duplicates the parent process, captures syscall return address (`LAST_USER_RIP`), and launches child in Ring 3 with `RAX=0` via `enter_user_mode_with_rax`.
+- **Program Replacement (`execve`)**: `sys_execve` (59) loads standalone ELF64 executables, resets address space, populates System V stack frame with `argc`/`argv`, and transitions the calling thread.
+- **Child Reaping (`wait4`)**: `sys_wait4` (61) blocks parent process until target child terminates, extracting exit status code (`WEXITSTATUS`).
+- **Win32 Process Model**: Implements `CreateProcessA` (0x1010), `WaitForSingleObject` (0x1011), `GetExitCodeProcess` (0x1012), and `VirtualProtect` (0x1013) user-mode VDSO thunks and kernel shims.
+
+

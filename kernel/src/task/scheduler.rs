@@ -1,9 +1,11 @@
-use alloc::collections::VecDeque;
+use alloc::collections::{BTreeMap, VecDeque};
 use alloc::string::String;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use spin::Mutex;
 
+use crate::task::process::Process;
 use crate::task::switch::context_switch;
 use crate::task::thread::{Thread, ThreadState};
 
@@ -18,6 +20,8 @@ pub struct Scheduler {
 static SCHEDULER: Mutex<Option<Scheduler>> = Mutex::new(None);
 static SCHEDULER_INITIALIZED: AtomicBool = AtomicBool::new(false);
 static CURRENT_TID: AtomicUsize = AtomicUsize::new(0);
+pub static PROCESS_TABLE: Mutex<BTreeMap<usize, Arc<Mutex<Process>>>> = Mutex::new(BTreeMap::new());
+static NEXT_PID: AtomicUsize = AtomicUsize::new(1);
 
 impl Scheduler {
     pub fn new() -> Self {
@@ -30,6 +34,7 @@ impl Scheduler {
         }
     }
 }
+
 
 pub fn init() {
     let mut sched = Scheduler::new();
@@ -57,7 +62,101 @@ pub fn init() {
     *SCHEDULER.lock() = Some(sched);
     CURRENT_TID.store(0, Ordering::SeqCst);
     SCHEDULER_INITIALIZED.store(true, Ordering::SeqCst);
+
+    // Register initial kernel process (PID 0)
+    let kernel_proc = Arc::new(Mutex::new(Process::new_kernel()));
+    PROCESS_TABLE.lock().insert(0, kernel_proc);
 }
+
+pub fn allocate_pid() -> usize {
+    NEXT_PID.fetch_add(1, Ordering::SeqCst)
+}
+
+pub fn register_process(proc: Process) -> usize {
+    let pid = proc.id;
+    let proc_arc = Arc::new(Mutex::new(proc));
+    PROCESS_TABLE.lock().insert(pid, proc_arc);
+    pid
+}
+
+pub fn get_process(pid: usize) -> Option<Arc<Mutex<Process>>> {
+    PROCESS_TABLE.lock().get(&pid).cloned()
+}
+
+pub fn get_current_process() -> Option<Arc<Mutex<Process>>> {
+    let tid = current_tid();
+    let pid = {
+        let lock = SCHEDULER.lock();
+        let sched = lock.as_ref()?;
+        sched.threads.iter().find(|t| t.id == tid).map(|t| t.process_id).unwrap_or(0)
+    };
+    get_process(pid)
+}
+
+pub fn current_pid() -> usize {
+    let tid = current_tid();
+    let lock = SCHEDULER.lock();
+    if let Some(sched) = lock.as_ref() {
+        sched.threads.iter().find(|t| t.id == tid).map(|t| t.process_id).unwrap_or(0)
+    } else {
+        0
+    }
+}
+
+pub fn set_process_exit_code(pid: usize, code: i32) {
+    if let Some(proc_arc) = get_process(pid) {
+        let mut proc = proc_arc.lock();
+        proc.is_alive = false;
+        proc.exit_code = Some(code);
+    }
+}
+
+pub fn reap_child_process(parent_pid: usize, target_child: isize) -> Option<(usize, i32)> {
+    let mut proc_table = PROCESS_TABLE.lock();
+    let parent_arc = proc_table.get(&parent_pid)?.clone();
+    let mut parent = parent_arc.lock();
+
+    let mut terminated_idx = None;
+    let mut result = None;
+
+    for (idx, &child_pid) in parent.children.iter().enumerate() {
+        if target_child == -1 || (target_child > 0 && child_pid == target_child as usize) {
+            if let Some(child_arc) = proc_table.get(&child_pid) {
+                let child = child_arc.lock();
+                if !child.is_alive {
+                    let code = child.exit_code.unwrap_or(0);
+                    result = Some((child_pid, code));
+                    terminated_idx = Some(idx);
+                    break;
+                }
+            }
+        }
+    }
+
+    if let Some(idx) = terminated_idx {
+        let (reaped_pid, _) = result.unwrap();
+        parent.children.remove(idx);
+        proc_table.remove(&reaped_pid);
+    }
+
+    result
+}
+
+pub fn spawn_with_pid(name: &str, pid: usize, entry: fn(), priority: u8) -> usize {
+    let mut lock = SCHEDULER.lock();
+    let sched = lock.as_mut().expect("Scheduler not initialized");
+
+    let tid = sched.next_tid;
+    sched.next_tid += 1;
+
+    let mut thread = Thread::new_kernel(tid, name, entry, priority);
+    thread.process_id = pid;
+    sched.threads.push(thread);
+    sched.ready_queue.push_back(tid);
+
+    tid
+}
+
 
 pub fn is_initialized() -> bool {
     SCHEDULER_INITIALIZED.load(Ordering::Relaxed)

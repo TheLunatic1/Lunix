@@ -175,9 +175,18 @@ fn create_fat32_image(img_path: &Path, bootloader_bin: &Path, kernel_bin: &Path)
     let mut sysinfo_file = bin_dir.create_file("sysinfo.elf")?;
     sysinfo_file.write_all(&sysinfo_elf)?;
 
+    let test_fork_elf = create_test_fork_elf();
+    let mut test_fork_file = bin_dir.create_file("test_fork.elf")?;
+    test_fork_file.write_all(&test_fork_elf)?;
+
+    let test_exec_elf = create_test_exec_elf();
+    let mut test_exec_file = bin_dir.create_file("test_exec.elf")?;
+    test_exec_file.write_all(&test_exec_elf)?;
+
     let win_hello_pe = create_win32_hello_exe();
     let mut win_hello_file = bin_dir.create_file("win_hello.exe")?;
     win_hello_file.write_all(&win_hello_pe)?;
+
 
     // Create /etc (os-release, hostname)
     root_dir.create_dir("etc")?;
@@ -336,6 +345,143 @@ fn create_sysinfo_elf() -> Vec<u8> {
 
     let disp2 = (msg2_pos as i32) - ((lea2_pos + 7) as i32);
     payload[lea2_pos + 3..lea2_pos + 7].copy_from_slice(&disp2.to_le_bytes());
+
+    build_elf64_binary(&payload)
+}
+
+fn create_test_fork_elf() -> Vec<u8> {
+    let msg_parent = b"\n  [PARENT] Calling Linux sys_clone / sys_fork in Ring 3...\n";
+    let msg_child = b"  [CHILD] Hello from cloned child process in Ring 3! Exiting with status 42...\n";
+    let msg_reaped = b"  [PARENT] Successfully reaped child process via sys_wait4! Exiting with status 0.\n\n";
+
+    let mut payload = Vec::new();
+
+    // 1. sys_write(1, msg_parent, len)
+    payload.extend_from_slice(&[0xB8, 0x01, 0x00, 0x00, 0x00]); // mov eax, 1
+    payload.extend_from_slice(&[0xBF, 0x01, 0x00, 0x00, 0x00]); // mov edi, 1
+    let lea_p_pos = payload.len();
+    payload.extend_from_slice(&[0x48, 0x8D, 0x35, 0x00, 0x00, 0x00, 0x00]); // lea rsi, [rip + msg_parent]
+    let len_p = msg_parent.len() as u32;
+    payload.extend_from_slice(&[0xBA, len_p as u8, (len_p >> 8) as u8, (len_p >> 16) as u8, (len_p >> 24) as u8]);
+    payload.extend_from_slice(&[0x0F, 0x05]); // syscall
+
+    // 2. sys_clone(0, 0) / sys_fork
+    payload.extend_from_slice(&[0xB8, 0x39, 0x00, 0x00, 0x00]); // mov eax, 57 (sys_fork)
+    payload.extend_from_slice(&[0x31, 0xFF]); // xor edi, edi
+    payload.extend_from_slice(&[0x31, 0xF6]); // xor esi, esi
+    payload.extend_from_slice(&[0x0F, 0x05]); // syscall
+
+    // test rax, rax
+    payload.extend_from_slice(&[0x48, 0x85, 0xC0]);
+    // jz child_branch
+    let jz_pos = payload.len();
+    payload.extend_from_slice(&[0x74, 0x00]);
+
+    // --- PARENT BRANCH ---
+    // sys_wait4(-1, &status, 0)
+    payload.extend_from_slice(&[0x48, 0x83, 0xEC, 0x10]); // sub rsp, 16
+    payload.extend_from_slice(&[0xB8, 0x3D, 0x00, 0x00, 0x00]); // mov eax, 61 (sys_wait4)
+    payload.extend_from_slice(&[0x48, 0xC7, 0xC7, 0xFF, 0xFF, 0xFF, 0xFF]); // mov rdi, -1
+    payload.extend_from_slice(&[0x48, 0x89, 0xE6]); // mov rsi, rsp
+    payload.extend_from_slice(&[0x31, 0xD2]); // xor edx, edx
+    payload.extend_from_slice(&[0x0F, 0x05]); // syscall
+    payload.extend_from_slice(&[0x48, 0x83, 0xC4, 0x10]); // add rsp, 16
+
+    // sys_write(1, msg_reaped, len)
+    payload.extend_from_slice(&[0xB8, 0x01, 0x00, 0x00, 0x00]); // mov eax, 1
+    payload.extend_from_slice(&[0xBF, 0x01, 0x00, 0x00, 0x00]); // mov edi, 1
+    let lea_r_pos = payload.len();
+    payload.extend_from_slice(&[0x48, 0x8D, 0x35, 0x00, 0x00, 0x00, 0x00]);
+    let len_r = msg_reaped.len() as u32;
+    payload.extend_from_slice(&[0xBA, len_r as u8, (len_r >> 8) as u8, (len_r >> 16) as u8, (len_r >> 24) as u8]);
+    payload.extend_from_slice(&[0x0F, 0x05]); // syscall
+
+    // sys_exit(0)
+    payload.extend_from_slice(&[0xB8, 0x3C, 0x00, 0x00, 0x00]); // mov eax, 60
+    payload.extend_from_slice(&[0x31, 0xFF]); // xor edi, edi
+    payload.extend_from_slice(&[0x0F, 0x05]); // syscall
+    payload.extend_from_slice(&[0xF4, 0xEB, 0xFD]); // hlt; jmp $-1
+
+    // --- CHILD BRANCH ---
+    let child_start = payload.len();
+    let jz_disp = (child_start - (jz_pos + 2)) as u8;
+    payload[jz_pos + 1] = jz_disp;
+
+    // sys_write(1, msg_child, len)
+    payload.extend_from_slice(&[0xB8, 0x01, 0x00, 0x00, 0x00]); // mov eax, 1
+    payload.extend_from_slice(&[0xBF, 0x01, 0x00, 0x00, 0x00]); // mov edi, 1
+    let lea_c_pos = payload.len();
+    payload.extend_from_slice(&[0x48, 0x8D, 0x35, 0x00, 0x00, 0x00, 0x00]);
+    let len_c = msg_child.len() as u32;
+    payload.extend_from_slice(&[0xBA, len_c as u8, (len_c >> 8) as u8, (len_c >> 16) as u8, (len_c >> 24) as u8]);
+    payload.extend_from_slice(&[0x0F, 0x05]); // syscall
+
+    // sys_exit(42)
+    payload.extend_from_slice(&[0xB8, 0x3C, 0x00, 0x00, 0x00]); // mov eax, 60
+    payload.extend_from_slice(&[0xBF, 0x2A, 0x00, 0x00, 0x00]); // mov edi, 42
+    payload.extend_from_slice(&[0x0F, 0x05]); // syscall
+    payload.extend_from_slice(&[0xF4, 0xEB, 0xFD]); // hlt; jmp $-1
+
+    // String payloads
+    let p_pos = payload.len();
+    payload.extend_from_slice(msg_parent);
+    let c_pos = payload.len();
+    payload.extend_from_slice(msg_child);
+    let r_pos = payload.len();
+    payload.extend_from_slice(msg_reaped);
+
+    // Patch LEA offsets
+    let disp_p = (p_pos as i32) - ((lea_p_pos + 7) as i32);
+    payload[lea_p_pos + 3..lea_p_pos + 7].copy_from_slice(&disp_p.to_le_bytes());
+
+    let disp_r = (r_pos as i32) - ((lea_r_pos + 7) as i32);
+    payload[lea_r_pos + 3..lea_r_pos + 7].copy_from_slice(&disp_r.to_le_bytes());
+
+    let disp_c = (c_pos as i32) - ((lea_c_pos + 7) as i32);
+    payload[lea_c_pos + 3..lea_c_pos + 7].copy_from_slice(&disp_c.to_le_bytes());
+
+    build_elf64_binary(&payload)
+}
+
+fn create_test_exec_elf() -> Vec<u8> {
+    let msg = b"\n  [EXEC] Invoking Linux sys_execve(\"/bin/hello.elf\") in Ring 3...\n\n";
+    let target = b"/bin/hello.elf\0";
+
+    let mut payload = Vec::new();
+
+    // 1. sys_write(1, msg, len)
+    payload.extend_from_slice(&[0xB8, 0x01, 0x00, 0x00, 0x00]); // mov eax, 1
+    payload.extend_from_slice(&[0xBF, 0x01, 0x00, 0x00, 0x00]); // mov edi, 1
+    let lea_msg_pos = payload.len();
+    payload.extend_from_slice(&[0x48, 0x8D, 0x35, 0x00, 0x00, 0x00, 0x00]);
+    let len_msg = msg.len() as u32;
+    payload.extend_from_slice(&[0xBA, len_msg as u8, (len_msg >> 8) as u8, (len_msg >> 16) as u8, (len_msg >> 24) as u8]);
+    payload.extend_from_slice(&[0x0F, 0x05]); // syscall
+
+    // 2. sys_execve("/bin/hello.elf", NULL, NULL)
+    payload.extend_from_slice(&[0xB8, 0x3B, 0x00, 0x00, 0x00]); // mov eax, 59 (sys_execve)
+    let lea_tgt_pos = payload.len();
+    payload.extend_from_slice(&[0x48, 0x8D, 0x3D, 0x00, 0x00, 0x00, 0x00]); // lea rdi, [rip + target]
+    payload.extend_from_slice(&[0x31, 0xF6]); // xor esi, esi (argv = NULL)
+    payload.extend_from_slice(&[0x31, 0xD2]); // xor edx, edx (envp = NULL)
+    payload.extend_from_slice(&[0x0F, 0x05]); // syscall
+
+    // 3. Fallback sys_exit(1)
+    payload.extend_from_slice(&[0xB8, 0x3C, 0x00, 0x00, 0x00]); // mov eax, 60
+    payload.extend_from_slice(&[0xBF, 0x01, 0x00, 0x00, 0x00]); // mov edi, 1
+    payload.extend_from_slice(&[0x0F, 0x05]); // syscall
+    payload.extend_from_slice(&[0xF4, 0xEB, 0xFD]);
+
+    let msg_pos = payload.len();
+    payload.extend_from_slice(msg);
+    let tgt_pos = payload.len();
+    payload.extend_from_slice(target);
+
+    let disp_m = (msg_pos as i32) - ((lea_msg_pos + 7) as i32);
+    payload[lea_msg_pos + 3..lea_msg_pos + 7].copy_from_slice(&disp_m.to_le_bytes());
+
+    let disp_t = (tgt_pos as i32) - ((lea_tgt_pos + 7) as i32);
+    payload[lea_tgt_pos + 3..lea_tgt_pos + 7].copy_from_slice(&disp_t.to_le_bytes());
 
     build_elf64_binary(&payload)
 }

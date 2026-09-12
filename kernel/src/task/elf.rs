@@ -49,6 +49,10 @@ pub struct LoadedProgram {
 static CURRENT_ELF_EXEC: Mutex<Option<LoadedProgram>> = Mutex::new(None);
 
 pub fn load_elf(elf_bytes: &[u8]) -> Result<LoadedProgram, &'static str> {
+    load_elf_with_args(elf_bytes, &["prog"])
+}
+
+pub fn load_elf_with_args(elf_bytes: &[u8], args: &[&str]) -> Result<LoadedProgram, &'static str> {
     if elf_bytes.len() < core::mem::size_of::<Elf64Header>() {
         return Err("Binary too small for ELF64 header");
     }
@@ -137,27 +141,41 @@ pub fn load_elf(elf_bytes: &[u8]) -> Result<LoadedProgram, &'static str> {
         }
     }
 
-    let user_stack_top = USER_STACK_BASE + (USER_STACK_SIZE as u64) - 64;
+    let user_stack_top = USER_STACK_BASE + (USER_STACK_SIZE as u64) - 256;
 
-    // Set up standard Linux initial user stack frame:
-    // [RSP + 0]  = argc (0)
-    // [RSP + 8]  = argv[0] (NULL)
-    // [RSP + 16] = NULL (end of envp)
-    // [RSP + 24] = AT_PAGESZ (6)
-    // [RSP + 32] = 4096
-    // [RSP + 40] = AT_ENTRY (9)
-    // [RSP + 48] = header.entry
-    // [RSP + 56] = AT_NULL (0)
+    // Set up standard Linux System V AMD64 initial user stack frame with argc/argv:
     unsafe {
-        let stack_ptr = (stack_top_frame + 4096 - 64) as *mut u64;
-        *stack_ptr.add(0) = 0; // argc = 0
-        *stack_ptr.add(1) = 0; // argv[0] = NULL
-        *stack_ptr.add(2) = 0; // envp = NULL
-        *stack_ptr.add(3) = 6; // AT_PAGESZ
-        *stack_ptr.add(4) = 4096;
-        *stack_ptr.add(5) = 9; // AT_ENTRY
-        *stack_ptr.add(6) = header.entry;
-        *stack_ptr.add(7) = 0; // AT_NULL
+        let string_base = (stack_top_frame + 4096 - 128) as *mut u8;
+        let stack_ptr = (stack_top_frame + 4096 - 256) as *mut u64;
+
+        let mut str_offset = 0usize;
+        let mut argv_addrs = [0u64; 16];
+
+        for (i, &arg) in args.iter().enumerate() {
+            if i < 16 && str_offset + arg.len() + 1 <= 128 {
+                let dst = string_base.add(str_offset);
+                core::ptr::copy_nonoverlapping(arg.as_ptr(), dst, arg.len());
+                *dst.add(arg.len()) = 0;
+                let virt_arg = (USER_STACK_BASE + (USER_STACK_SIZE as u64) - 128) + str_offset as u64;
+                argv_addrs[i] = virt_arg;
+                str_offset += arg.len() + 1;
+            }
+        }
+
+        let argc = args.len().min(16);
+        *stack_ptr.add(0) = argc as u64; // argc
+        for i in 0..argc {
+            *stack_ptr.add(1 + i) = argv_addrs[i]; // argv[i]
+        }
+        *stack_ptr.add(1 + argc) = 0; // argv[argc] = NULL
+        *stack_ptr.add(2 + argc) = 0; // envp = NULL
+
+        let aux_base = 3 + argc;
+        *stack_ptr.add(aux_base) = 6; // AT_PAGESZ
+        *stack_ptr.add(aux_base + 1) = 4096;
+        *stack_ptr.add(aux_base + 2) = 9; // AT_ENTRY
+        *stack_ptr.add(aux_base + 3) = header.entry;
+        *stack_ptr.add(aux_base + 4) = 0; // AT_NULL
     }
 
     Ok(LoadedProgram {
@@ -179,17 +197,35 @@ fn elf_runner_trampoline() {
 }
 
 pub fn exec_elf(path: &str) -> Result<usize, String> {
+    exec_elf_with_args(path, &[path])
+}
+
+pub fn exec_elf_with_args(path: &str, args: &[&str]) -> Result<usize, String> {
     lunix_println!("[ELF] Loading binary '{}' from VFS...", path);
     let bytes = crate::fs::vfs::read_to_vec(path)
         .map_err(|e| alloc::format!("Failed to read '{}': {:?}", path, e))?;
 
-    let prog = load_elf(&bytes)
+    let prog = load_elf_with_args(&bytes, args)
         .map_err(|e| alloc::format!("ELF loader error: {}", e))?;
 
     *CURRENT_ELF_EXEC.lock() = Some(prog);
 
-    lunix_println!("[+] Spawned Ring 3 ELF process thread");
-    let tid = crate::task::scheduler::spawn("elf_process", elf_runner_trampoline, 8);
+    let pid = crate::task::scheduler::allocate_pid();
+    let (cr3_frame, _) = x86_64::registers::control::Cr3::read();
+    let ppid = crate::task::scheduler::current_pid();
+    let proc = crate::task::process::Process::new_user(pid, ppid, path, cr3_frame.start_address().as_u64());
+    crate::task::scheduler::register_process(proc);
+
+    if ppid != pid {
+        if let Some(parent_proc) = crate::task::scheduler::get_process(ppid) {
+            parent_proc.lock().children.push(pid);
+        }
+    }
+
+    lunix_println!("[+] Spawned Ring 3 ELF process (PID: {}, PPID: {})", pid, ppid);
+    let tid = crate::task::scheduler::spawn_with_pid("elf_process", pid, elf_runner_trampoline, 8);
     Ok(tid)
 }
+
+
 

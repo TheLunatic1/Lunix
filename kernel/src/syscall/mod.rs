@@ -63,6 +63,10 @@ pub const WIN32_SYS_GETCURRENTTID: usize = 0x100C;
 pub const WIN32_SYS_SLEEP: usize = 0x100D;
 pub const WIN32_SYS_GETCOMMANDLINE: usize = 0x100E;
 pub const WIN32_SYS_GETMODULEHANDLE: usize = 0x100F;
+pub const WIN32_SYS_CREATEPROCESS: usize = 0x1010;
+pub const WIN32_SYS_WAITFORSINGLEOBJECT: usize = 0x1011;
+pub const WIN32_SYS_GETEXITCODEPROCESS: usize = 0x1012;
+pub const WIN32_SYS_VIRTUALPROTECT: usize = 0x1013;
 
 static USER_BRK: Mutex<u64> = Mutex::new(0x0000_6000_0000_0000);
 
@@ -131,7 +135,7 @@ pub extern "C" fn syscall_dispatcher(
         LINUX_SYS_GETCWD => sys_getcwd(arg1 as *mut u8, arg2 as usize) as u64,
         LINUX_SYS_CHDIR => sys_chdir(arg1 as *const u8, arg2 as usize) as u64,
         LINUX_SYS_READLINK => sys_readlink(arg1 as *const u8, arg2 as *mut u8, arg3 as usize) as u64,
-        LINUX_SYS_GETPPID => 1, // Parent is PID 1
+        LINUX_SYS_GETPPID => sys_getppid() as u64,
         LINUX_SYS_GETDENTS64 => sys_getdents64(arg1 as usize, arg2 as *mut u8, arg3 as usize) as u64,
         LINUX_SYS_EXIT_GROUP => sys_exit(arg1 as i32),
         LINUX_SYS_OPENAT => sys_openat(arg1 as i32, arg2 as *const u8, arg3 as u32) as u64,
@@ -193,6 +197,27 @@ pub extern "C" fn syscall_dispatcher(
         WIN32_SYS_GETMODULEHANDLE => {
             0x0040_0000 // Image Base
         }
+        WIN32_SYS_CREATEPROCESS => {
+            crate::subsystems::nt::win32::sys_win32_create_process(
+                arg1 as *const u8,
+                arg2 as *const u8,
+                arg3 as *mut crate::subsystems::nt::win32::ProcessInformation,
+            ) as u64
+        }
+        WIN32_SYS_WAITFORSINGLEOBJECT => {
+            crate::subsystems::nt::win32::sys_win32_wait_for_single_object(arg1, arg2 as u32) as u64
+        }
+        WIN32_SYS_GETEXITCODEPROCESS => {
+            crate::subsystems::nt::win32::sys_win32_get_exit_code_process(arg1, arg2 as *mut u32) as u64
+        }
+        WIN32_SYS_VIRTUALPROTECT => {
+            crate::subsystems::nt::win32::sys_win32_virtual_protect(
+                arg1,
+                arg2 as usize,
+                arg3 as u32,
+                arg4 as *mut u32,
+            ) as u64
+        }
 
         _ => {
             lunix_println!("[SYSCALL] Unimplemented syscall number: {}", num);
@@ -201,10 +226,21 @@ pub extern "C" fn syscall_dispatcher(
     }
 }
 
+
 pub fn sys_exit(code: i32) -> ! {
-    lunix_println!("  [SYSCALL] Process exited with status code: {}", code);
+    let pid = crate::task::scheduler::current_pid();
+    crate::task::scheduler::set_process_exit_code(pid, code);
+    lunix_println!("  [SYSCALL] Process (PID {}) exited with status code: {}", pid, code);
     crate::drivers::keyboard::print_prompt();
     crate::task::scheduler::exit_current_thread();
+}
+
+pub fn sys_getppid() -> isize {
+    if let Some(proc_arc) = crate::task::scheduler::get_current_process() {
+        proc_arc.lock().ppid as isize
+    } else {
+        1
+    }
 }
 
 pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> isize {
@@ -214,8 +250,21 @@ pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> isize {
 
     let slice = unsafe { slice::from_raw_parts(buf, len) };
 
+    // Check process FDs first
+    let is_std_out = if let Some(proc_arc) = crate::task::scheduler::get_current_process() {
+        let proc = proc_arc.lock();
+        if let Some(desc_arc) = proc.get_fd(fd) {
+            let desc = desc_arc.lock();
+            desc.kind == crate::task::process::FdKind::Stdout || desc.kind == crate::task::process::FdKind::Stderr
+        } else {
+            fd == 1 || fd == 2
+        }
+    } else {
+        fd == 1 || fd == 2
+    };
+
     // FDs 1 (stdout) and 2 (stderr)
-    if fd == 1 || fd == 2 {
+    if is_std_out {
         if let Ok(s) = core::str::from_utf8(slice) {
             lunix_print!("{}", s);
             return len as isize;
@@ -235,7 +284,19 @@ pub fn sys_read(fd: usize, buf: *mut u8, len: usize) -> isize {
         return 0;
     }
 
-    if fd == 0 {
+    let is_std_in = if let Some(proc_arc) = crate::task::scheduler::get_current_process() {
+        let proc = proc_arc.lock();
+        if let Some(desc_arc) = proc.get_fd(fd) {
+            let desc = desc_arc.lock();
+            desc.kind == crate::task::process::FdKind::Stdin
+        } else {
+            fd == 0
+        }
+    } else {
+        fd == 0
+    };
+
+    if is_std_in {
         // Stdin: non-blocking or single byte
         let slice = unsafe { slice::from_raw_parts_mut(buf, len) };
         slice[0] = 0;
@@ -548,7 +609,9 @@ pub fn sys_execve(filename_ptr: *const u8, _argv_ptr: *const *const u8, _envp_pt
     let slice = unsafe { core::slice::from_raw_parts(filename_ptr, len) };
     if let Ok(path) = core::str::from_utf8(slice) {
         match crate::task::elf::exec_elf(path) {
-            Ok(_) => 0,
+            Ok(_) => {
+                crate::task::scheduler::exit_current_thread();
+            }
             Err(_) => -1,
         }
     } else {
@@ -557,32 +620,67 @@ pub fn sys_execve(filename_ptr: *const u8, _argv_ptr: *const *const u8, _envp_pt
 }
 
 static CLONE_USER_STACK: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static CLONE_USER_ENTRY: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 fn clone_runner_trampoline() {
     let stack = CLONE_USER_STACK.load(core::sync::atomic::Ordering::SeqCst);
+    let entry = CLONE_USER_ENTRY.load(core::sync::atomic::Ordering::SeqCst);
     unsafe {
-        crate::task::user::enter_user_mode(0x400000, stack);
+        crate::task::user::enter_user_mode_with_rax(entry, stack, 0);
     }
 }
 
 pub fn sys_clone(_flags: u64, stack: u64) -> isize {
-    if stack != 0 {
-        CLONE_USER_STACK.store(stack, core::sync::atomic::Ordering::SeqCst);
-        let tid = crate::task::scheduler::spawn("user_clone", clone_runner_trampoline, 6);
-        tid as isize
-    } else {
-        0 // Child in fork
+    let current_pid = crate::task::scheduler::current_pid();
+    let child_pid = crate::task::scheduler::allocate_pid();
+
+    if let Some(parent_proc) = crate::task::scheduler::get_process(current_pid) {
+        let child_proc = parent_proc.lock().clone_process(child_pid);
+        crate::task::scheduler::register_process(child_proc);
+        parent_proc.lock().children.push(child_pid);
     }
+
+    let return_rip = crate::arch::x86_64::syscall::LAST_USER_RIP.load(core::sync::atomic::Ordering::SeqCst);
+    let entry = if return_rip != 0 { return_rip } else { 0x400078 };
+    CLONE_USER_ENTRY.store(entry, core::sync::atomic::Ordering::SeqCst);
+
+    let user_stack = if stack != 0 {
+        stack
+    } else {
+        let last_rsp = crate::arch::x86_64::syscall::LAST_USER_RSP.load(core::sync::atomic::Ordering::SeqCst);
+        if last_rsp != 0 { last_rsp } else { crate::task::elf::USER_STACK_BASE + (crate::task::elf::USER_STACK_SIZE as u64) - 512 }
+    };
+
+    CLONE_USER_STACK.store(user_stack, core::sync::atomic::Ordering::SeqCst);
+    let _tid = crate::task::scheduler::spawn_with_pid("user_fork", child_pid, clone_runner_trampoline, 6);
+    child_pid as isize
 }
 
-pub fn sys_wait4(_pid: isize, status_ptr: *mut i32, _options: i32) -> isize {
+
+
+pub fn sys_wait4(pid: isize, status_ptr: *mut i32, _options: i32) -> isize {
+    let parent_pid = crate::task::scheduler::current_pid();
+
+    for _ in 0..100 {
+        if let Some((child_pid, exit_code)) = crate::task::scheduler::reap_child_process(parent_pid, pid) {
+            if !status_ptr.is_null() {
+                unsafe {
+                    *status_ptr = (exit_code & 0xFF) << 8; // WEXITSTATUS format
+                }
+            }
+            return child_pid as isize;
+        }
+        crate::task::scheduler::sleep_ms(10);
+    }
+
     if !status_ptr.is_null() {
         unsafe {
-            *status_ptr = 0; // WEXITSTATUS = 0
+            *status_ptr = 0;
         }
     }
-    1
+    if pid > 0 { pid } else { 1 }
 }
+
 
 pub fn sys_openat(_dfd: i32, filename_ptr: *const u8, flags: u32) -> isize {
     if filename_ptr.is_null() {
