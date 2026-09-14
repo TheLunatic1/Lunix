@@ -2,6 +2,7 @@
 
 #[derive(Debug, Clone, Copy)]
 pub struct Fat32Layout {
+    pub partition_start_lba: u64,
     pub bytes_per_sector: u32,
     pub sectors_per_cluster: u32,
     pub reserved_sectors: u32,
@@ -13,7 +14,7 @@ pub struct Fat32Layout {
 }
 
 impl Fat32Layout {
-    pub fn parse(buf: &[u8]) -> Option<Self> {
+    pub fn parse(buf: &[u8], partition_start_lba: u64) -> Option<Self> {
         if buf.len() < 512 {
             return None;
         }
@@ -57,6 +58,7 @@ impl Fat32Layout {
             let first_data_sector = reserved_sectors + (num_fats * fat_size);
 
             Some(Self {
+                partition_start_lba,
                 bytes_per_sector,
                 sectors_per_cluster,
                 reserved_sectors,
@@ -70,10 +72,11 @@ impl Fat32Layout {
     }
 
     pub fn cluster_to_lba(&self, cluster: u32) -> u64 {
+        let base_data_lba = self.partition_start_lba + self.first_data_sector as u64;
         if cluster < 2 {
-            self.first_data_sector as u64
+            base_data_lba
         } else {
-            (self.first_data_sector + (cluster - 2) * self.sectors_per_cluster) as u64
+            base_data_lba + ((cluster - 2) * self.sectors_per_cluster) as u64
         }
     }
 

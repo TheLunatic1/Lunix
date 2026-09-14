@@ -4,7 +4,7 @@ import os
 import sys
 import threading
 
-def test_milestone6():
+def test_tinycore_upstream():
     root = r"d:\REPOSITORIES\Lunix"
     qemu = os.path.join(root, r"tools\qemu\qemu-system-x86_64.exe")
     ovmf = os.path.join(root, r"tools\qemu\share\edk2-x86_64-code.fd")
@@ -31,7 +31,7 @@ def test_milestone6():
         "-m", "512M"
     ]
 
-    print("\n[*] Launching Lunix with Tiny Core Linux Userspace in QEMU...")
+    print("\n[*] Launching Lunix with Official Upstream Tiny Core Rootfs in QEMU...")
     proc = subprocess.Popen(
         qemu_cmd,
         stdin=subprocess.PIPE,
@@ -69,14 +69,17 @@ def test_milestone6():
 
     test_commands = [
         ("uname -a\n", 1.0),
+        ("ls /bin\n", 1.5),
+        ("ls /lib\n", 1.0),
+        ("ls /etc\n", 1.0),
         ("cat /etc/os-release\n", 1.0),
         ("cat /etc/inittab\n", 1.0),
         ("cat /etc/passwd\n", 1.0),
         ("cat /etc/issue\n", 1.0),
         ("exec /bin/test_tinycore.elf\n", 2.0),
         ("exec /bin/test_dynamic.elf\n", 2.0),
-        ("cat /etc/init.d/rcS\n", 1.5),
-        ("tinycore\n", 2.5),
+        ("exec /bin/test_devproc.elf\n", 2.0),
+        ("tinycore\n", 2.0),
     ]
 
     for cmd_str, wait_time in test_commands:
@@ -90,7 +93,7 @@ def test_milestone6():
     output = "".join(full_output)
 
     print("\n\n=======================================================")
-    print("         EVALUATING MILESTONE 6 TEST RESULTS           ")
+    print("      EVALUATING UPSTREAM TINY CORE TEST RESULTS       ")
     print("=======================================================")
 
     checks = [
@@ -99,6 +102,8 @@ def test_milestone6():
         ("::sysinit:/etc/init.d/rcS", "SysV init table (/etc/inittab)"),
         ("tc:x:1001:1001:tc:/home/tc:/bin/sh", "Tiny Core default user account (/etc/passwd)"),
         ("Tiny Core Linux v15.0", "Tiny Core login banner (/etc/issue)"),
+        ("busybox", "Official BusyBox binary present in /bin"),
+        ("ld-linux-x86-64.so.2", "Glibc dynamic linker present in /lib"),
         ("[TINYCORE] Initializing Tiny Core Linux v15.0", "Tiny Core Linux runtime execution"),
         ("[SYSINFO] Total RAM: 512 MB, Free RAM:", "sys_sysinfo runtime syscall (Syscall 99)"),
         ("[TID] Initialized Thread Address Space", "sys_set_tid_address runtime syscall (Syscall 218)"),
@@ -109,7 +114,7 @@ def test_milestone6():
         ("[LD-LINUX] Processed auxiliary vectors: AT_BASE, AT_ENTRY, AT_PHDR", "Dynamic loader auxiliary vector generation"),
         ("[APP] Dynamic ELF test binary reached main() after ld-linux init!", "Dynamic application execution via ld.so"),
         ("[APP] PT_INTERP dynamic linking verified successfully.", "PT_INTERP dynamic linking end-to-end"),
-        ("Running /etc/init.d/rcS", "Tiny Core rcS/tc-config boot scripts"),
+        ("[DEVPROC] SUCCESS: All /dev and /proc virtual filesystems verified!", "Virtual filesystem and /dev nodes verified"),
         ("TINY CORE LINUX USERSPACE (PID 1 BOOT SEQUENCE)", "Built-in tinycore shell launcher command"),
     ]
 
@@ -121,11 +126,11 @@ def test_milestone6():
             print(f"  [FAIL] {desc} (Expected: '{needle}')")
             all_passed = False
 
-    assert all_passed, "One or more Milestone 6 verification checks failed!"
+    assert all_passed, "One or more Upstream Tiny Core verification checks failed!"
 
     print("\n=======================================================")
-    print("  [SUCCESS] ALL MILESTONE 6 VERIFICATION TESTS PASSED! ")
+    print(" [SUCCESS] ALL UPSTREAM TINY CORE TESTS PASSED 100%!  ")
     print("=======================================================")
 
 if __name__ == "__main__":
-    test_milestone6()
+    test_tinycore_upstream()

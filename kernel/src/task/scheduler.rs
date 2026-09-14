@@ -21,7 +21,7 @@ static SCHEDULER: Mutex<Option<Scheduler>> = Mutex::new(None);
 static SCHEDULER_INITIALIZED: AtomicBool = AtomicBool::new(false);
 static CURRENT_TID: AtomicUsize = AtomicUsize::new(0);
 pub static PROCESS_TABLE: Mutex<BTreeMap<usize, Arc<Mutex<Process>>>> = Mutex::new(BTreeMap::new());
-static NEXT_PID: AtomicUsize = AtomicUsize::new(1);
+static NEXT_PID: AtomicUsize = AtomicUsize::new(2);
 
 impl Scheduler {
     pub fn new() -> Self {
@@ -50,6 +50,7 @@ pub fn init() {
         stack: Vec::new(), // Uses bootloader/initial kernel stack
         rsp: 0,
         kernel_rsp_top: 0,
+        fs_base: 0,
         entry_fn: None,
         is_user: false,
     };
@@ -271,7 +272,7 @@ pub fn schedule() {
         return;
     }
 
-    let (old_rsp_ptr, new_rsp, next_rsp_top) = {
+    let (old_rsp_ptr, new_rsp, next_rsp_top, next_pid, next_fs_base) = {
         let mut lock = SCHEDULER.lock();
         let sched = lock.as_mut().unwrap();
 
@@ -306,6 +307,9 @@ pub fn schedule() {
 
         // Prepare context switch
         let old_thread = sched.threads.iter_mut().find(|t| t.id == current_tid).unwrap();
+        unsafe {
+            old_thread.fs_base = crate::arch::x86_64::io::rdmsr(0xC000_0100);
+        }
         let old_rsp_ptr = &mut old_thread.rsp as *mut u64;
 
         let next_thread = sched.threads.iter_mut().find(|t| t.id == next_tid).unwrap();
@@ -313,11 +317,14 @@ pub fn schedule() {
         next_thread.quantum_remaining = 10;
         let new_rsp = next_thread.rsp;
         let next_rsp_top = next_thread.kernel_rsp_top;
+        let next_fs_base = next_thread.fs_base;
+
+        let next_pid = next_thread.process_id;
 
         sched.current_tid = next_tid;
         CURRENT_TID.store(next_tid, Ordering::SeqCst);
 
-        (old_rsp_ptr, new_rsp, next_rsp_top)
+        (old_rsp_ptr, new_rsp, next_rsp_top, next_pid, next_fs_base)
     };
 
     // Update TSS RSP0 and Syscall stack for user mode privilege transitions
@@ -326,10 +333,45 @@ pub fn schedule() {
         crate::arch::x86_64::syscall::set_kernel_syscall_stack(next_rsp_top);
     }
 
+    // Restore incoming thread's TLS FS_BASE MSR (0xC000_0100)
+    unsafe {
+        crate::arch::x86_64::io::wrmsr(0xC000_0100, next_fs_base);
+    }
+
+    // Switch CR3 to target process's page table if different
+    if let Some(proc_arc) = get_process(next_pid) {
+        let proc_cr3 = proc_arc.lock().cr3;
+        if proc_cr3 != 0 {
+            let (current_cr3, flags) = x86_64::registers::control::Cr3::read();
+            if current_cr3.start_address().as_u64() != proc_cr3 {
+                unsafe {
+                    x86_64::registers::control::Cr3::write(
+                        x86_64::structures::paging::PhysFrame::containing_address(x86_64::PhysAddr::new(proc_cr3)),
+                        flags,
+                    );
+                }
+            }
+        }
+    }
+
     // Perform hardware context switch
     unsafe {
         context_switch(old_rsp_ptr, new_rsp);
     }
+}
+
+pub fn set_thread_fs_base(tid: usize, fs_base: u64) {
+    let mut lock = SCHEDULER.lock();
+    if let Some(sched) = lock.as_mut() {
+        if let Some(thread) = sched.threads.iter_mut().find(|t| t.id == tid) {
+            thread.fs_base = fs_base;
+        }
+    }
+}
+
+pub fn set_current_thread_fs_base(fs_base: u64) {
+    let tid = current_tid();
+    set_thread_fs_base(tid, fs_base);
 }
 
 /// Called on every timer tick (1000 Hz / 1ms)

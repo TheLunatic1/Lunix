@@ -106,17 +106,71 @@ extern "x86-interrupt" fn page_fault_handler(
     error_code: PageFaultErrorCode,
 ) {
     use crate::arch::x86_64::serial::{write_hex, write_str};
-    use x86_64::registers::control::Cr2;
+    use x86_64::registers::control::{Cr2, Cr3};
+    use x86_64::structures::paging::PageTable;
 
+    let fault_addr = Cr2::read().map(|a| a.as_u64()).unwrap_or(0);
     write_str("\n[EXCEPTION] PAGE FAULT, CR2 (Fault Addr): ");
-    write_hex(Cr2::read().map(|a| a.as_u64()).unwrap_or(0));
+    write_hex(fault_addr);
     write_str(", Error Code: ");
     write_hex(error_code.bits());
     write_str(", RIP: ");
     write_hex(stack_frame.instruction_pointer.as_u64());
     write_str(", RSP: ");
     write_hex(stack_frame.stack_pointer.as_u64());
+    let (cr3_frame, _) = Cr3::read();
+    write_str(", Active CR3: ");
+    write_hex(cr3_frame.start_address().as_u64());
     write_str("\n");
+
+    // Dump page table walk
+    let pml4 = unsafe { &*(cr3_frame.start_address().as_u64() as *const PageTable) };
+    let p4_idx = ((fault_addr >> 39) & 0x1FF) as usize;
+    let p3_idx = ((fault_addr >> 30) & 0x1FF) as usize;
+    let p2_idx = ((fault_addr >> 21) & 0x1FF) as usize;
+    let p1_idx = ((fault_addr >> 12) & 0x1FF) as usize;
+
+    write_str("  [PT_WALK] PML4[");
+    write_hex(p4_idx as u64);
+    write_str("] = ");
+    write_hex(pml4[p4_idx].addr().as_u64());
+    write_str(" flags=");
+    write_hex(pml4[p4_idx].flags().bits());
+    write_str("\n");
+
+    if !pml4[p4_idx].is_unused() {
+        let pdpt = unsafe { &*(pml4[p4_idx].addr().as_u64() as *const PageTable) };
+        write_str("  [PT_WALK] PDPT[");
+        write_hex(p3_idx as u64);
+        write_str("] = ");
+        write_hex(pdpt[p3_idx].addr().as_u64());
+        write_str(" flags=");
+        write_hex(pdpt[p3_idx].flags().bits());
+        write_str("\n");
+
+        if !pdpt[p3_idx].is_unused() {
+            let pd = unsafe { &*(pdpt[p3_idx].addr().as_u64() as *const PageTable) };
+            write_str("  [PT_WALK] PD[");
+            write_hex(p2_idx as u64);
+            write_str("] = ");
+            write_hex(pd[p2_idx].addr().as_u64());
+            write_str(" flags=");
+            write_hex(pd[p2_idx].flags().bits());
+            write_str("\n");
+
+            if !pd[p2_idx].is_unused() {
+                let pt = unsafe { &*(pd[p2_idx].addr().as_u64() as *const PageTable) };
+                write_str("  [PT_WALK] PT[");
+                write_hex(p1_idx as u64);
+                write_str("] = ");
+                write_hex(pt[p1_idx].addr().as_u64());
+                write_str(" flags=");
+                write_hex(pt[p1_idx].flags().bits());
+                write_str("\n");
+            }
+        }
+    }
+
     crate::arch::x86_64::hlt_loop()
 }
 

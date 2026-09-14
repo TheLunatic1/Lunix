@@ -13,8 +13,43 @@ static mut SYSCALL_STACK: SyscallStack = SyscallStack([0; 16384]);
 
 static mut USER_RSP_SCRATCH: u64 = 0;
 static mut KERNEL_RSP_SCRATCH: u64 = 0;
-pub static LAST_USER_RIP: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
-pub static LAST_USER_RSP: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct UserContext {
+    pub r15: u64,     // 0
+    pub r14: u64,     // 8
+    pub r13: u64,     // 16
+    pub r12: u64,     // 24
+    pub rbp: u64,     // 32
+    pub rbx: u64,     // 40
+    pub r10: u64,     // 48
+    pub r9: u64,      // 56
+    pub r8: u64,      // 64
+    pub rdx: u64,     // 72
+    pub rsi: u64,     // 80
+    pub rdi: u64,     // 88
+    pub rip: u64,     // 96
+    pub rflags: u64,  // 104
+    pub rsp: u64,     // 112
+    pub fs_base: u64, // 120
+    pub rax: u64,     // 128
+}
+
+pub static CURRENT_USER_CONTEXT: spin::Mutex<UserContext> = spin::Mutex::new(UserContext {
+    r15: 0, r14: 0, r13: 0, r12: 0, rbp: 0, rbx: 0,
+    r10: 0, r9: 0, r8: 0, rdx: 0, rsi: 0, rdi: 0,
+    rip: 0, rflags: 0, rsp: 0, fs_base: 0, rax: 0,
+});
+
+#[no_mangle]
+pub extern "C" fn save_user_context(ctx_ptr: *const UserContext) {
+    if !ctx_ptr.is_null() {
+        let mut ctx = unsafe { *ctx_ptr };
+        let fs_base = unsafe { crate::arch::x86_64::io::rdmsr(0xC000_0100) };
+        ctx.fs_base = fs_base;
+        *CURRENT_USER_CONTEXT.lock() = ctx;
+    }
+}
 
 pub fn init() {
     unsafe {
@@ -51,61 +86,77 @@ pub unsafe extern "C" fn syscall_entry() {
     core::arch::naked_asm!(
         // Save user RSP into scratch and switch to kernel stack
         "mov [rip + {user_rsp}], rsp",
-        "mov [rip + {last_user_rsp}], rsp",
-        "mov [rip + {last_user_rip}], rcx",
         "mov rsp, [rip + {kernel_rsp}]",
 
+        // Save complete User register state on kernel stack (15 qwords = 120 bytes):
+        "push qword ptr [rip + {user_rsp}]", // [rsp + 112] User RSP
+        "push r11",                          // [rsp + 104] User RFLAGS
+        "push rcx",                          // [rsp + 96]  User RIP
+        "push rdi",                          // [rsp + 88]  User RDI
+        "push rsi",                          // [rsp + 80]  User RSI
+        "push rdx",                          // [rsp + 72]  User RDX
+        "push r8",                           // [rsp + 64]  User R8
+        "push r9",                           // [rsp + 56]  User R9
+        "push r10",                          // [rsp + 48]  User R10
+        "push rbx",                          // [rsp + 40]  User RBX
+        "push rbp",                          // [rsp + 32]  User RBP
+        "push r12",                          // [rsp + 24]  User R12
+        "push r13",                          // [rsp + 16]  User R13
+        "push r14",                          // [rsp + 8]   User R14
+        "push r15",                          // [rsp + 0]   User R15
 
-        // Save User context on kernel stack:
-        "push qword ptr [rip + {user_rsp}]", // [rsp + 80] = User RSP
-        "push r11",                          // [rsp + 72] = User RFLAGS
-        "push rcx",                          // [rsp + 64] = User RIP
-        "push rbp",
-        "push rbx",
-        "push r12",
-        "push r13",
-        "push r14",
-        "push r15",
+        // Save user context for clone/fork:
+        "push rax",                          // preserve syscall number
+        "mov rdi, rsp",
+        "add rdi, 8",                        // point rdi to UserContext ([rsp + 8])
+        "call {save_ctx}",
+        "pop rax",                           // restore syscall number
 
-        // Pass syscall parameters:
-        // rax = syscall_num -> rdi
-        // rdi = arg1        -> rsi
-        // rsi = arg2        -> rdx
-        // rdx = arg3        -> rcx
-        // r10 = arg4        -> r8
-        // r8  = arg5        -> r9
-        // r9  = arg6        -> stack
-        "push r9",
-        "mov r9, r8",
-        "mov r8, r10",
-        "mov rcx, rdx",
-        "mov rdx, rsi",
-        "mov rsi, rdi",
-        "mov rdi, rax",
+        // Load arguments for syscall_dispatcher(num, a1, a2, a3, a4, a5, a6):
+        // rax = num -> rdi
+        // [rsp + 88] = a1 (rdi) -> rsi
+        // [rsp + 80] = a2 (rsi) -> rdx
+        // [rsp + 72] = a3 (rdx) -> rcx
+        // [rsp + 48] = a4 (r10) -> r8
+        // [rsp + 64] = a5 (r8)  -> r9
+        // [rsp + 56] = a6 (r9)  -> stack (7th argument in SysV AMD64)
+        "mov r11, [rsp + 56]",               // r9 (arg6)
+        "mov r9,  [rsp + 64]",               // r8 (arg5)
+        "mov r8,  [rsp + 48]",               // r10 (arg4)
+        "mov rcx, [rsp + 72]",               // rdx (arg3)
+        "mov rdx, [rsp + 80]",               // rsi (arg2)
+        "mov rsi, [rsp + 88]",               // rdi (arg1)
+        "mov rdi, rax",                      // num
+        "push r11",                          // push 7th arg (arg6) on stack
 
         "call {dispatcher}",
 
         // Pop 7th argument
         "add rsp, 8",
 
-        // Restore registers
+        // Restore all user registers in reverse order:
         "pop r15",
         "pop r14",
         "pop r13",
         "pop r12",
-        "pop rbx",
         "pop rbp",
-        "pop rcx",           // Restore User RIP for sysret
-        "pop r11",           // Restore User RFLAGS for sysret
-        "pop rsp",           // Restore User RSP directly from kernel stack
+        "pop rbx",
+        "pop r10",
+        "pop r9",
+        "pop r8",
+        "pop rdx",
+        "pop rsi",
+        "pop rdi",
+        "pop rcx",                           // User RIP for sysret
+        "pop r11",                           // User RFLAGS for sysret
+        "pop rsp",                           // User RSP directly from kernel stack
 
         // Return to user mode (64-bit sysret)
         "sysretq",
 
         user_rsp = sym USER_RSP_SCRATCH,
         kernel_rsp = sym KERNEL_RSP_SCRATCH,
-        last_user_rsp = sym LAST_USER_RSP,
-        last_user_rip = sym LAST_USER_RIP,
+        save_ctx = sym save_user_context,
         dispatcher = sym crate::syscall::syscall_dispatcher,
     );
 }

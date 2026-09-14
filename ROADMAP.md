@@ -44,8 +44,9 @@ graph TD
     M2 --> M3["Milestone 3: Virtual Pseudo-Filesystems (/dev & /proc)"]
     M3 --> M4["Milestone 4: Real Linux Distro Userspace (BusyBox Rootfs)"]
     M4 --> M5["Milestone 5: Advanced Hardware Drivers (AHCI/NVMe/VirtIO/WDM)"]
-    M5 --> M6["Milestone 6: Tiny Core Linux Userspace & VMware Workstation Support"]
-    M6 --> M7["Milestone 7: Hardware Graphics Acceleration (VirtIO-GPU / DRM)"]
+    M5 --> M6["Milestone 6: Tiny Core Linux Rootfs Ingestion & VMware Support"]
+    M6 --> M7["Milestone 7: Real Linux Userspace Bootstrap & Address Space Isolation"]
+    M7 --> M8["Milestone 8: Hardware Graphics Acceleration (VirtIO-GPU / DRM)"]
 ```
 
 ---
@@ -183,42 +184,87 @@ graph TD
 
 ---
 
-### Milestone 6: Real Tiny Core Linux Userspace & VMware Workstation Support
-**Objective**: Boot real-world Tiny Core Linux distribution userspace on Lunix bare-metal kernel and export production VM disks.
+### Milestone 6: Official Upstream Tiny Core Linux Rootfs Ingestion, Linux Framebuffer (/dev/fb0) & VMware Support
+**Objective**: Ingest the official upstream Tiny Core Linux x86_64 rootfs (`corepure64.gz` / `TinyCorePure64.iso`), replace the Linux kernel with our 100% pure Rust bare-metal Lunix kernel, support Linux Framebuffer `/dev/fb0` with GOP physical MMIO page mapping, and export VMware/VirtualBox VM disks.
 
-#### 6.1 Dynamic ELF Interpreter & Auxiliary Vectors
-- [x] **`PT_INTERP` Parsing & Loader**:
+#### 6.1 Official Upstream Tiny Core Rootfs Ingestion
+- [x] **Upstream Archive Decompression & Ingestion**:
+  - Ingests all 1,855+ files (385 directories, 1,060 regular files, 285 symlinks) from upstream `corepure64.gz` / `TinyCorePure64.iso` (Tiny Core Linux v15.0 x86_64) into the root FAT32 disk image (`target/lunix.img`, 256 MiB).
+  - Replaces upstream `vmlinuz64` with custom bare-metal `lunix-kernel` and UEFI bootloader `lunix-bootloader.efi`.
+  - Official 64-bit GNU Glibc 2.38 dynamic linker (`/lib/ld-linux-x86-64.so.2`), Glibc C library (`libc.so.6`), and upstream BusyBox binary execute directly on the Lunix bare-metal kernel.
+- [x] **Dynamic ELF Interpreter & Auxiliary Vectors**:
   - Parse `PT_INTERP` program header extracting interpreter path (e.g. `/lib/ld-linux-x86-64.so.2`).
   - Read interpreter binary from VFS and map its `PT_LOAD` segments into userspace at `INTERP_LOAD_BASE` (`0x0000_7FFF_E000_0000`).
-  - Transition Ring 3 execution to interpreter entry point.
-- [x] **Dynamic Loader Auxiliary Vectors (auxv)**:
   - Populate complete System V auxiliary vector table on user stack: `AT_BASE`, `AT_ENTRY`, `AT_PHDR`, `AT_PHENT`, `AT_PHNUM`, `AT_PAGESZ`, `AT_RANDOM`, `AT_EXECFN`, `AT_CLKTCK`, `AT_NULL`.
-- [x] **File-Backed `sys_mmap` (Syscall 9)**:
-  - Map shared object files (`.so`) directly from VFS descriptors with offsets into user page tables.
 
-#### 6.2 C Runtime & Tiny Core System Syscalls
+#### 6.2 Linux Framebuffer Subsystem (/dev/fb0) & Input Devices
+- [x] **Linux Framebuffer Device Node (`/dev/fb0`, `/dev/fb/0`)**:
+  - Implemented `FbHandle` character device node in `devfs`.
+  - In `sys_mmap`, detects file descriptors opening `/dev/fb0` and performs direct page table mapping of UEFI GOP physical MMIO memory into userspace virtual memory.
+  - Implemented Linux Framebuffer ioctls: `FBIOGET_VSCREENINFO` (`0x4600`), `FBIOPUT_VSCREENINFO` (`0x4601`), `FBIOGET_FSCREENINFO` (`0x4602`), and VT switching ioctls.
+  - Registered `/dev/input/mice`, `/dev/input/event0`, `/dev/tty0`..`/dev/tty2` device handles.
+
+#### 6.3 Advanced Linux Syscalls for Upstream Glibc & System Control
+- [x] `sys_pread64` (17) & `sys_writev` (20) / `sys_readv` (19): Non-destructive seek reads and scatter-gather vector I/O.
+- [x] `sys_fstat` (5), `sys_select` (23), `sys_madvise` (28), `sys_gettid` (186), `sys_tgkill` (234).
 - [x] `sys_sysinfo` (99): Returns total RAM, free RAM, uptime, and process count in `struct sysinfo`.
 - [x] `sys_set_tid_address` (218): Thread address space initialization for glibc/musl.
 - [x] `sys_set_robust_list` (273) & `sys_get_robust_list` (274): Robust futex list tracking.
 - [x] `sys_futex` (202): Fast user-space mutex waiting (`FUTEX_WAIT`) and wake-up notifications (`FUTEX_WAKE`).
-- [x] `sys_mount` (165) & `sys_umount2` (166): Filesystem mount points and flag handling.
-- [x] `sys_rseq` (334): Restartable sequences registration for glibc 2.35+.
-- [x] `sys_rename` (82): Atomic file/directory renaming.
-
-#### 6.3 Tiny Core Linux Root Filesystem & Distribution Environment
-- [x] Bootstraps `/sbin/init` (PID 1) executing `/etc/init.d/rcS` and mounting pseudo-filesystems (`/proc`, `/dev`, `/sys`).
-- [x] Complete standard Linux filesystem layout: `/etc/inittab`, `/etc/passwd`, `/etc/group`, `/etc/issue`, `/etc/os-release`, `/etc/hostname`, `/home/tc/`, `/tmp/`, `/var/`, `/lib/`, `/lib64/`.
-- [x] Standalone ELF binaries: `/bin/test_tinycore.elf` and `/bin/test_dynamic.elf` (`PT_INTERP` -> `/lib/ld-linux-x86-64.so.2`).
-- [x] Interactive `tinycore` command in Lunix shell launching Tiny Core Linux init sequence.
+- [x] `sys_mount` (165), `sys_umount2` (166), `sys_rseq` (334), `sys_rename` (82).
+- [x] Extended `FdTarget::VfsHandle` with 64-bit unique `inode_id` to prevent library deduplication collisions in Glibc `ld-linux`.
 
 #### 6.4 VMware Workstation & VirtualBox VM Disk Export
 - [x] Automated `target/lunix.vmdk` generation for VMware Workstation Pro / Player (UEFI boot enabled).
 - [x] Automated `target/lunix.vdi` generation for VirtualBox.
-- [x] Dedicated build subcommands: `cargo run --package xtask -- vmdk` and `cargo run --package xtask -- vbox`.
+- [x] Dedicated build subcommands: `cargo run --package xtask -- vmdk`, `cargo run --package xtask -- vbox`, `cargo run --package xtask -- build`.
 
 #### 6.5 Verification & Success Criteria
-- [x] Automated test runner (`tests/test_milestone6.py`) passing 100% (18/18 checks) in QEMU.
-- [x] Full regression test suite (Milestones 1 through 6) passing 100% (94/94 total checks).
+- [x] `tests/test_tinycore_upstream.py` passing 100% (19/19 checks) in QEMU.
+- [x] `tests/test_milestone6.py` passing 100% (17/17 checks) in QEMU.
+- [x] Full regression test suite (Milestones 1 through 6) passing 100% (108/108 total checks).
+
+---
+
+### Milestone 7: Real Linux Userspace Bootstrap & Hardware Address Space Isolation
+**Objective**: Complete hardware address space (PML4) isolation across forked processes, per-thread Thread-Local Storage (`FS_BASE`) MSR context switching, and bootstrap PID 1 `/sbin/init` executing `/etc/init.d/rcS` startup scripts.
+
+#### 7.1 Hardware Page Table Duplication (`fork`)
+- [x] **`clone_process_pml4` Engine**:
+  - Implemented deep 4-level PML4 page directory walker duplicating user-space mappings (PML4 entries 0..255, `< 0x0000_8000_0000_0000`).
+  - Allocates dedicated physical 4 KiB frames for all PDPT, PD, and PT levels and copies memory contents for user pages (stack, heap, code, data).
+  - Preserves shared higher-half kernel memory mappings (`>= 0xFFFF_8000_0000_0000`) across all processes without duplicating kernel structures.
+  - Distinguishes glibc `_Fork()` (`0x1200011` = `CLONE_CHILD_SETTID | CLONE_CHILD_CLEARTID | SIGCHLD`) as a true `fork()`, providing child processes dedicated address spaces and eliminating stack corruption.
+
+#### 7.2 Thread-Local Storage (TLS) `FS_BASE` MSR Context Switching
+- [x] Added `fs_base` tracking to `ThreadControlBlock` (`Thread`).
+- [x] Extended scheduler context switch in `Scheduler::schedule()` to read `old_thread.fs_base = rdmsr(0xC000_0100)` and write `wrmsr(0xC000_0100, next_fs_base)`.
+- [x] Integrated `set_current_thread_fs_base` into `sys_arch_prctl` and `exec_elf_replace` for instant synchronization with glibc/musl `pthread_t` runtime structures.
+
+#### 7.3 PID 1 `/sbin/init` & `/etc/init.d/rcS` Userspace Bootstrapper
+- [x] Added kernel `tinycore` command bootstrapping PID 1 `/sbin/init`.
+- [x] Parses `/etc/inittab`, executes `/etc/init.d/rcS` sysinit scripts, mounts `/proc`, `/sys`, `/dev` via `/bin/mount`, and gracefully drops to shell upon completion.
+- [x] Implemented `sys_wait4` status reaping with correct `wstatus` formatting (`WEXITSTATUS`), unblocking parent processes upon child exit.
+
+#### 7.4 Verification & Success Criteria
+- [x] Live QEMU execution of `tinycore` cleanly executes `/sbin/init` -> `/bin/sh /etc/init.d/rcS` -> `/bin/mount` and returns to shell.
+- [x] Standalone test binaries (`test_fork.elf`, `test_dynamic.elf`, `win_hello.exe`, `win_stream.exe`, `win_envreg.exe`) passing 100%.
+
+---
+
+### Milestone 8: Hardware Graphics Acceleration (VirtIO-GPU / DRM)
+**Objective**: Implement 2D/3D hardware graphics acceleration via VirtIO-GPU and Linux Direct Rendering Manager (DRM / KMS) interfaces for high-performance window compositing and X11/Wayland support.
+
+#### 8.1 VirtIO-GPU Driver & 2D/3D Command Submission
+- [ ] Probe PCI class `0x03` subclass `0x00` prog-if `0x00` for VirtIO GPU device (`0x1AF4:0x1050`).
+- [ ] Configure Split VirtQueues (`ctrlq`, `cursorq`).
+- [ ] Implement 2D Resource Creation, 2D Resource Attach Backing, Set Scanout, and Transfer to Host 2D.
+- [ ] Implement VirGL 3D Command Submission for hardware-accelerated OpenGL / Vulkan primitives.
+
+#### 8.2 Linux Direct Rendering Manager (`/dev/dri/card0`, `/dev/dri/renderD128`)
+- [ ] Implement character device nodes `/dev/dri/card0` and `/dev/dri/renderD128`.
+- [ ] Implement DRM KMS ioctls: `DRM_IOCTL_VERSION`, `DRM_IOCTL_GET_RESOURCES`, `DRM_IOCTL_MODE_GETCONNECTOR`, `DRM_IOCTL_MODE_GETCRTC`, `DRM_IOCTL_MODE_SETCRTC`, `DRM_IOCTL_MODE_CREATE_DUMB`, `DRM_IOCTL_MODE_MAP_DUMB`, `DRM_IOCTL_MODE_ADDFB`, `DRM_IOCTL_MODE_RMFB`.
+- [ ] Support page flipping with VSync interrupt synchronization.
 
 ---
 
@@ -246,8 +292,10 @@ graph TD
 | **Win32 Environment & In-Memory Registry** | ✅ **Complete** | **Milestone 3** |
 | **BusyBox Userspace, TLS & Signal Engine** | ✅ **Complete** | **Milestone 4** |
 | **AHCI / NVMe / VirtIO & Expanded WDM Drivers** | ✅ **Complete** | **Milestone 5** |
-| **Tiny Core Linux Userspace & VMware VMDK Export** | ✅ **Complete** | **Milestone 6** |
-| Hardware Graphics Acceleration (VirtIO-GPU / DRM) | ⏳ Planned | Milestone 7 |
+| **Official Tiny Core Rootfs, /dev/fb0 & VMware VMDK** | ✅ **Complete** | **Milestone 6** |
+| **Real Linux Userspace Bootstrap & Address Space Isolation** | ✅ **Complete** | **Milestone 7** |
+| Hardware Graphics Acceleration (VirtIO-GPU / DRM) | ⏳ Planned | Milestone 8 |
+
 
 
 

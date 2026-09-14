@@ -610,7 +610,7 @@ fn execute_command(cmd: &str) -> ExecResult {
             } else {
                 "/bin/busybox"
             };
-            match crate::task::elf::exec_elf_with_args(init_path, &[init_path]) {
+            match crate::task::elf::exec_elf_with_args(init_path, &["init"]) {
                 Ok(_) => {
                     return ExecResult::AsyncProcessSpawned;
                 }
@@ -618,6 +618,7 @@ fn execute_command(cmd: &str) -> ExecResult {
                     lunix_println!("init: failed to launch '{}': {}", init_path, e);
                 }
             }
+
         }
         "gui" => {
             lunix_println!("Launching LunixWM 32-bit Graphical Window Compositor...");

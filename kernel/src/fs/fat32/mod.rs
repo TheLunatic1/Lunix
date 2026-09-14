@@ -29,24 +29,103 @@ pub struct Fat32FileSystem {
 
 impl Fat32FileSystem {
     pub fn new(device: Arc<dyn BlockDevice>) -> Option<Self> {
-        let mut boot_sector = [0u8; 512];
-        if device.read_blocks(0, 1, &mut boot_sector).is_err() {
+        let mut sector0 = [0u8; 512];
+        if device.read_blocks(0, 1, &mut sector0).is_err() {
             return None;
         }
 
-        let layout = Fat32Layout::parse(&boot_sector)?;
-        let cluster_mgr = Arc::new(ClusterManager::new(device.clone(), layout));
+        // 1. Check if disk has a GPT (GUID Partition Table) header at Sector 1
+        let mut sector1 = [0u8; 512];
+        if device.read_blocks(1, 1, &mut sector1).is_ok() && &sector1[0..8] == b"EFI PART" {
+            let part_entry_lba = u64::from_le_bytes([
+                sector1[72], sector1[73], sector1[74], sector1[75],
+                sector1[76], sector1[77], sector1[78], sector1[79],
+            ]);
+            let num_entries = u32::from_le_bytes([
+                sector1[80], sector1[81], sector1[82], sector1[83],
+            ]);
 
-        lunix_serial_println!("  [FAT32] Initialized on device '{}' (Sector: {} B, Cluster: {} Sec, Root Cluster: {})",
-            device.name(), layout.bytes_per_sector, layout.sectors_per_cluster, layout.root_cluster
-        );
+            if part_entry_lba > 0 && num_entries > 0 {
+                let mut part_table_sector = [0u8; 512];
+                if device.read_blocks(part_entry_lba, 1, &mut part_table_sector).is_ok() {
+                    for entry_idx in 0..core::cmp::min(4, num_entries as usize) {
+                        let offset = entry_idx * 128;
+                        let start_lba = u64::from_le_bytes([
+                            part_table_sector[offset + 32], part_table_sector[offset + 33],
+                            part_table_sector[offset + 34], part_table_sector[offset + 35],
+                            part_table_sector[offset + 36], part_table_sector[offset + 37],
+                            part_table_sector[offset + 38], part_table_sector[offset + 39],
+                        ]);
 
-        Some(Self {
-            device,
-            layout,
-            cluster_mgr,
-            lock: Mutex::new(()),
-        })
+                        if start_lba > 0 {
+                            let mut part_sector = [0u8; 512];
+                            if device.read_blocks(start_lba, 1, &mut part_sector).is_ok() {
+                                if let Some(layout) = Fat32Layout::parse(&part_sector, start_lba) {
+                                    let cluster_mgr = Arc::new(ClusterManager::new(device.clone(), layout));
+                                    lunix_serial_println!("  [FAT32] Initialized GPT Partition {} (LBA {}) on device '{}' (Sector: {} B, Cluster: {} Sec, Root Cluster: {})",
+                                        entry_idx + 1, start_lba, device.name(), layout.bytes_per_sector, layout.sectors_per_cluster, layout.root_cluster
+                                    );
+                                    return Some(Self {
+                                        device,
+                                        layout,
+                                        cluster_mgr,
+                                        lock: Mutex::new(()),
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 2. If Sector 0 is an MBR, check MBR partition table (offsets 0x1BE, 0x1CE, 0x1DE, 0x1EE)
+        if sector0[510] == 0x55 && sector0[511] == 0xAA {
+            for i in 0..4 {
+                let entry_offset = 446 + i * 16;
+                let part_type = sector0[entry_offset + 4];
+                let start_lba = u32::from_le_bytes([
+                    sector0[entry_offset + 8],
+                    sector0[entry_offset + 9],
+                    sector0[entry_offset + 10],
+                    sector0[entry_offset + 11],
+                ]) as u64;
+
+                if start_lba > 0 && (part_type == 0xEF || part_type == 0x0C || part_type == 0x0B || part_type == 0x07 || part_type == 0x83 || part_type == 0x06) {
+                    let mut part_sector = [0u8; 512];
+                    if device.read_blocks(start_lba, 1, &mut part_sector).is_ok() {
+                        if let Some(layout) = Fat32Layout::parse(&part_sector, start_lba) {
+                            let cluster_mgr = Arc::new(ClusterManager::new(device.clone(), layout));
+                            lunix_serial_println!("  [FAT32] Initialized MBR Partition {} (LBA {}) on device '{}' (Sector: {} B, Cluster: {} Sec, Root Cluster: {})",
+                                i + 1, start_lba, device.name(), layout.bytes_per_sector, layout.sectors_per_cluster, layout.root_cluster
+                            );
+                            return Some(Self {
+                                device,
+                                layout,
+                                cluster_mgr,
+                                lock: Mutex::new(()),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        // 3. Fallback: try parsing Sector 0 directly as an unpartitioned FAT32 BPB
+        if let Some(layout) = Fat32Layout::parse(&sector0, 0) {
+            let cluster_mgr = Arc::new(ClusterManager::new(device.clone(), layout));
+            lunix_serial_println!("  [FAT32] Initialized unpartitioned on device '{}' (Sector: {} B, Cluster: {} Sec, Root Cluster: {})",
+                device.name(), layout.bytes_per_sector, layout.sectors_per_cluster, layout.root_cluster
+            );
+            return Some(Self {
+                device,
+                layout,
+                cluster_mgr,
+                lock: Mutex::new(()),
+            });
+        }
+
+        None
     }
 
     fn traverse_path(&self, path_str: &str) -> Result<ParsedFatEntry, VfsError> {

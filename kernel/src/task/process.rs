@@ -25,7 +25,11 @@ pub enum FdTarget {
     PipeRead(Arc<Mutex<crate::task::pipe::PipeBuffer>>),
     PipeWrite(Arc<Mutex<crate::task::pipe::PipeBuffer>>),
     Socket(usize),
-    VfsHandle(Arc<Mutex<Box<dyn crate::fs::file::FileHandle>>>),
+    VfsHandle {
+        handle: Arc<Mutex<Box<dyn crate::fs::file::FileHandle>>>,
+        path: String,
+        inode_id: u64,
+    },
 }
 
 #[derive(Clone)]
@@ -40,6 +44,7 @@ pub struct Process {
     pub name: String,
     pub threads: Vec<usize>,
     pub children: Vec<usize>,
+    pub vfork_waiting_parent: Option<usize>,
     pub cr3: u64,
     pub cwd: String,
     pub is_alive: bool,
@@ -58,6 +63,7 @@ impl Process {
             name: String::from("kernel"),
             threads: Vec::new(),
             children: Vec::new(),
+            vfork_waiting_parent: None,
             cr3: cr3_frame.start_address().as_u64(),
             cwd: String::from("/"),
             is_alive: true,
@@ -76,6 +82,7 @@ impl Process {
             name: String::from(name),
             threads: Vec::new(),
             children: Vec::new(),
+            vfork_waiting_parent: None,
             cr3,
             cwd: String::from("/"),
             is_alive: true,
@@ -101,8 +108,18 @@ impl Process {
         })));
     }
 
-    pub fn clone_process(&self, new_pid: usize) -> Self {
-        let mut new_proc = Self::new_user(new_pid, self.id, &self.name, self.cr3);
+    pub fn clone_process(&self, new_pid: usize, is_vfork: bool) -> Self {
+        let child_cr3 = if is_vfork {
+            self.cr3
+        } else {
+            if let Ok(frame) = crate::mm::vmm::clone_process_pml4(x86_64::PhysAddr::new(self.cr3)) {
+                frame.start_address().as_u64()
+            } else {
+                self.cr3
+            }
+        };
+
+        let mut new_proc = Self::new_user(new_pid, self.id, &self.name, child_cr3);
         new_proc.cwd = self.cwd.clone();
         for i in 0..MAX_FD {
             if let Some(ref fd) = self.fds[i] {

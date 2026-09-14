@@ -24,7 +24,9 @@ impl ClusterManager {
         }
 
         let fat_offset = current_cluster * 4;
-        let fat_sector = self.layout.reserved_sectors as u64 + (fat_offset / self.layout.bytes_per_sector) as u64;
+        let fat_sector = self.layout.partition_start_lba
+            + self.layout.reserved_sectors as u64
+            + (fat_offset / self.layout.bytes_per_sector) as u64;
         let sector_offset = (fat_offset % self.layout.bytes_per_sector) as usize;
 
         let mut sector_buf = [0u8; 512];

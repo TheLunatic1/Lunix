@@ -23,6 +23,7 @@ pub struct Thread {
     pub stack: Vec<u8>,
     pub rsp: u64,
     pub kernel_rsp_top: u64,
+    pub fs_base: u64,
     pub entry_fn: Option<fn()>,
     pub is_user: bool,
 }
@@ -36,25 +37,25 @@ impl Thread {
         // Initialize stack frame for context_switch
         // Layout:
         // [stack_top - 8]  = return address (thread_trampoline)
-        // [stack_top - 16] = RFLAGS (0x202 = Interrupts Enabled)
-        // [stack_top - 24] = r15 (0)
-        // [stack_top - 32] = r14 (0)
+        // [stack_top - 16] = rbp (0)
+        // [stack_top - 24] = rbx (0)
+        // [stack_top - 32] = r12 (0)
         // [stack_top - 40] = r13 (0)
-        // [stack_top - 48] = r12 (0)
-        // [stack_top - 56] = rbx (0)
-        // [stack_top - 64] = rbp (0)
+        // [stack_top - 48] = r14 (0)
+        // [stack_top - 56] = r15 (0)
+        // [stack_top - 64] = RFLAGS (0x202 = Interrupts Enabled)
         let initial_rsp = stack_top - 64;
 
         unsafe {
             let p = stack_top as *mut u64;
             p.sub(1).write(thread_trampoline as *const () as usize as u64); // Return address
-            p.sub(2).write(0x202);                            // RFLAGS: IF enabled
-            p.sub(3).write(0);                                // r15
-            p.sub(4).write(0);                                // r14
+            p.sub(2).write(0);                                // rbp
+            p.sub(3).write(0);                                // rbx
+            p.sub(4).write(0);                                // r12
             p.sub(5).write(0);                                // r13
-            p.sub(6).write(0);                                // r12
-            p.sub(7).write(0);                                // rbx
-            p.sub(8).write(0);                                // rbp
+            p.sub(6).write(0);                                // r14
+            p.sub(7).write(0);                                // r15
+            p.sub(8).write(0x202);                            // RFLAGS (popped by popfq)
         }
 
         Self {
@@ -67,6 +68,7 @@ impl Thread {
             stack,
             rsp: initial_rsp,
             kernel_rsp_top: stack_top,
+            fs_base: 0,
             entry_fn: Some(entry_fn),
             is_user: false,
         }

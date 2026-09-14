@@ -179,6 +179,105 @@ impl FileHandle for BlockDevHandle {
     }
 }
 
+pub struct FbHandle {
+    position: u64,
+    size: u64,
+    base: u64,
+}
+
+impl FbHandle {
+    pub fn new() -> Self {
+        if let Some(fb) = crate::display::console::get_framebuffer_info() {
+            let size = (fb.stride * fb.height * fb.bytes_per_pixel) as u64;
+            Self {
+                position: 0,
+                size,
+                base: fb.base_address,
+            }
+        } else {
+            Self {
+                position: 0,
+                size: 1024 * 768 * 4,
+                base: 0,
+            }
+        }
+    }
+}
+
+impl FileHandle for FbHandle {
+    fn read(&mut self, buf: &mut [u8]) -> Result<usize, &'static str> {
+        if self.base == 0 || self.position >= self.size {
+            return Ok(0);
+        }
+        let available = (self.size - self.position) as usize;
+        let to_read = buf.len().min(available);
+        unsafe {
+            let src = (self.base + self.position) as *const u8;
+            core::ptr::copy_nonoverlapping(src, buf.as_mut_ptr(), to_read);
+        }
+        self.position += to_read as u64;
+        Ok(to_read)
+    }
+
+    fn write(&mut self, buf: &[u8]) -> Result<usize, &'static str> {
+        if self.base == 0 || self.position >= self.size {
+            return Ok(buf.len());
+        }
+        let available = (self.size - self.position) as usize;
+        let to_write = buf.len().min(available);
+        unsafe {
+            let dst = (self.base + self.position) as *mut u8;
+            core::ptr::copy_nonoverlapping(buf.as_ptr(), dst, to_write);
+        }
+        self.position += to_write as u64;
+        Ok(to_write)
+    }
+
+    fn seek(&mut self, pos: SeekFrom) -> Result<u64, &'static str> {
+        let new_pos = match pos {
+            SeekFrom::Start(off) => off as i64,
+            SeekFrom::Current(off) => self.position as i64 + off,
+            SeekFrom::End(off) => self.size as i64 + off,
+        };
+        if new_pos < 0 {
+            return Err("Invalid negative seek");
+        }
+        self.position = (new_pos as u64).min(self.size);
+        Ok(self.position)
+    }
+
+    fn size(&self) -> u64 {
+        self.size
+    }
+}
+
+pub struct MiceHandle;
+impl FileHandle for MiceHandle {
+    fn read(&mut self, buf: &mut [u8]) -> Result<usize, &'static str> {
+        if buf.len() >= 3 {
+            let mouse = crate::drivers::mouse::get_mouse_state();
+            buf[0] = 0x08 | (if mouse.left_button { 1 } else { 0 }) | (if mouse.right_button { 2 } else { 0 });
+            buf[1] = 0;
+            buf[2] = 0;
+            Ok(3)
+        } else {
+            Ok(0)
+        }
+    }
+
+    fn write(&mut self, buf: &[u8]) -> Result<usize, &'static str> {
+        Ok(buf.len())
+    }
+
+    fn seek(&mut self, _pos: SeekFrom) -> Result<u64, &'static str> {
+        Ok(0)
+    }
+
+    fn size(&self) -> u64 {
+        0
+    }
+}
+
 // -----------------------------------------------------------------------------
 // DevFs FileSystem Implementation
 // -----------------------------------------------------------------------------
@@ -198,7 +297,10 @@ impl FileSystem for DevFs {
             "null" => Ok(Box::new(NullHandle)),
             "zero" => Ok(Box::new(ZeroHandle)),
             "urandom" | "random" => Ok(Box::new(RandomHandle)),
-            "tty" | "console" => Ok(Box::new(TtyHandle)),
+            "tty" | "console" | "tty0" | "tty1" | "tty2" | "ptmx" | "pts/0" | "pts/1" => Ok(Box::new(TtyHandle)),
+            "fb0" | "fb/0" | "graphics/fb0" => Ok(Box::new(FbHandle::new())),
+            "mice" | "input/mice" => Ok(Box::new(MiceHandle)),
+            "input/event0" => Ok(Box::new(MiceHandle)),
             "sda" => Ok(Box::new(BlockDevHandle {
                 position: 0,
                 size: 64 * 1024 * 1024,
@@ -212,6 +314,10 @@ impl FileSystem for DevFs {
         if !clean.is_empty() && clean != "." {
             return Err(VfsError::NotADirectory);
         }
+
+        let fb_size = crate::display::console::get_framebuffer_info()
+            .map(|fb| (fb.stride * fb.height * fb.bytes_per_pixel) as u64)
+            .unwrap_or(1024 * 768 * 4);
 
         let entries = alloc::vec![
             DirectoryEntry {
@@ -240,7 +346,27 @@ impl FileSystem for DevFs {
                 size: 0,
             },
             DirectoryEntry {
+                name: String::from("tty0"),
+                node_type: INodeType::CharDevice,
+                size: 0,
+            },
+            DirectoryEntry {
+                name: String::from("tty1"),
+                node_type: INodeType::CharDevice,
+                size: 0,
+            },
+            DirectoryEntry {
                 name: String::from("console"),
+                node_type: INodeType::CharDevice,
+                size: 0,
+            },
+            DirectoryEntry {
+                name: String::from("fb0"),
+                node_type: INodeType::CharDevice,
+                size: fb_size,
+            },
+            DirectoryEntry {
+                name: String::from("mice"),
                 node_type: INodeType::CharDevice,
                 size: 0,
             },
@@ -265,6 +391,10 @@ impl FileSystem for DevFs {
                 name: String::from("dev"),
             });
         }
+
+        let fb_size = crate::display::console::get_framebuffer_info()
+            .map(|fb| (fb.stride * fb.height * fb.bytes_per_pixel) as u64)
+            .unwrap_or(1024 * 768 * 4);
 
         match clean {
             "null" => Ok(INode {
@@ -295,7 +425,7 @@ impl FileSystem for DevFs {
                 permissions: 0o666,
                 name: String::from("random"),
             }),
-            "tty" => Ok(INode {
+            "tty" | "tty0" | "tty1" | "tty2" | "ptmx" | "pts/0" | "pts/1" => Ok(INode {
                 id: 6,
                 size: 0,
                 node_type: INodeType::CharDevice,
@@ -308,6 +438,27 @@ impl FileSystem for DevFs {
                 node_type: INodeType::CharDevice,
                 permissions: 0o666,
                 name: String::from("console"),
+            }),
+            "fb0" | "fb/0" | "graphics/fb0" => Ok(INode {
+                id: 9,
+                size: fb_size,
+                node_type: INodeType::CharDevice,
+                permissions: 0o666,
+                name: String::from("fb0"),
+            }),
+            "mice" | "input/mice" => Ok(INode {
+                id: 10,
+                size: 0,
+                node_type: INodeType::CharDevice,
+                permissions: 0o666,
+                name: String::from("mice"),
+            }),
+            "input/event0" => Ok(INode {
+                id: 11,
+                size: 0,
+                node_type: INodeType::CharDevice,
+                permissions: 0o666,
+                name: String::from("event0"),
             }),
             "sda" => Ok(INode {
                 id: 8,

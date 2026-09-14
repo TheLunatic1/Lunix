@@ -56,10 +56,72 @@ pub struct LoadedProgram {
 static CURRENT_ELF_EXEC: Mutex<Option<LoadedProgram>> = Mutex::new(None);
 
 pub fn load_elf(elf_bytes: &[u8]) -> Result<LoadedProgram, &'static str> {
-    load_elf_with_args(elf_bytes, &["prog"])
+    let (prog, _pml4) = load_elf_with_args(elf_bytes, &["prog"], 1)?;
+    Ok(prog)
 }
 
-pub fn load_elf_with_args(elf_bytes: &[u8], args: &[&str]) -> Result<LoadedProgram, &'static str> {
+static ELF_EXEC_MAP: Mutex<alloc::collections::BTreeMap<usize, LoadedProgram>> = Mutex::new(alloc::collections::BTreeMap::new());
+
+fn map_and_load_segment(
+    pml4_phys: x86_64::PhysAddr,
+    vaddr: u64,
+    memsz: usize,
+    filesz: usize,
+    file_bytes: &[u8],
+) -> Result<(), &'static str> {
+    let page_start = vaddr & !0xFFFu64;
+    let page_end = (vaddr + memsz as u64 + 4095) & !0xFFFu64;
+    let mut current_page = page_start;
+
+    while current_page < page_end {
+        let phys_frame = if let Some(existing) = crate::mm::vmm::get_page_phys_in_pml4(pml4_phys, VirtAddr::new(current_page)) {
+            existing
+        } else {
+            let frame = crate::mm::pmm::alloc_frame().ok_or("Out of memory for user page")?;
+            unsafe {
+                core::ptr::write_bytes(frame.as_u64() as *mut u8, 0, 4096);
+            }
+            let flags = PageTableFlags::PRESENT
+                | PageTableFlags::WRITABLE
+                | PageTableFlags::USER_ACCESSIBLE;
+            crate::mm::vmm::map_page_in_pml4(pml4_phys, VirtAddr::new(current_page), frame, flags)?;
+            frame
+        };
+
+        let page_vstart = current_page;
+        let page_vend = current_page + 4096;
+        let seg_vstart = vaddr;
+        let seg_vend = vaddr + filesz as u64;
+
+        if seg_vend > page_vstart && seg_vstart < page_vend && filesz > 0 {
+            let copy_vstart = seg_vstart.max(page_vstart);
+            let copy_vend = seg_vend.min(page_vend);
+            let copy_len = (copy_vend - copy_vstart) as usize;
+
+            let file_offset = (copy_vstart - seg_vstart) as usize;
+            let page_offset = (copy_vstart - page_vstart) as usize;
+
+            if file_offset + copy_len <= file_bytes.len() {
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        file_bytes.as_ptr().add(file_offset),
+                        (phys_frame.as_u64() + page_offset as u64) as *mut u8,
+                        copy_len,
+                    );
+                }
+            }
+        }
+
+        current_page += 4096;
+    }
+    Ok(())
+}
+
+pub fn load_elf_with_args(
+    elf_bytes: &[u8],
+    args: &[&str],
+    pid: usize,
+) -> Result<(LoadedProgram, x86_64::structures::paging::PhysFrame<x86_64::structures::paging::Size4KiB>), &'static str> {
     if elf_bytes.len() < core::mem::size_of::<Elf64Header>() {
         return Err("Binary too small for ELF64 header");
     }
@@ -76,7 +138,10 @@ pub fn load_elf_with_args(elf_bytes: &[u8], args: &[&str]) -> Result<LoadedProgr
         return Err("Not a 64-bit x86_64 ELF binary");
     }
 
-    lunix_serial_println!("  [ELF64] Valid ELF found. Entry: 0x{:X}, PhNum: {}, Type: {}", header.entry, header.phnum, header.elf_type);
+    lunix_serial_println!("  [ELF64] Valid ELF found (PID {}). Entry: 0x{:X}, PhNum: {}, Type: {}", pid, header.entry, header.phnum, header.elf_type);
+
+    let proc_pml4_frame = crate::mm::vmm::create_process_pml4()?;
+    let pml4_phys = proc_pml4_frame.start_address();
 
     let phdr_size = header.phentsize as usize;
     let mut interp_path_buf = [0u8; 128];
@@ -119,33 +184,15 @@ pub fn load_elf_with_args(elf_bytes: &[u8], args: &[&str]) -> Result<LoadedProgr
 
             lunix_serial_println!("  [ELF64] PT_LOAD: VAddr=0x{:X}, FileSz={}, MemSz={}", vaddr, filesz, memsz);
 
-            let num_pages = (memsz + 4095) / 4096;
-            for p in 0..num_pages {
-                let page_vaddr = VirtAddr::new(vaddr + (p * 4096) as u64);
-                let phys_frame = crate::mm::pmm::alloc_frame().ok_or("Out of memory for user page")?;
-
-                let flags = PageTableFlags::PRESENT
-                    | PageTableFlags::WRITABLE
-                    | PageTableFlags::USER_ACCESSIBLE;
-
-                let _ = crate::mm::vmm::map_page(page_vaddr, phys_frame, flags);
-
-                unsafe {
-                    core::ptr::write_bytes(phys_frame.as_u64() as *mut u8, 0, 4096);
-                }
-            }
-
             let src_start = phdr.p_offset as usize;
             let src_end = src_start + filesz;
-            if src_end <= elf_bytes.len() {
-                unsafe {
-                    core::ptr::copy_nonoverlapping(
-                        elf_bytes.as_ptr().add(src_start),
-                        vaddr as *mut u8,
-                        filesz,
-                    );
-                }
-            }
+            let seg_bytes = if src_end <= elf_bytes.len() {
+                &elf_bytes[src_start..src_end]
+            } else {
+                &[]
+            };
+
+            map_and_load_segment(pml4_phys, vaddr, memsz, filesz, seg_bytes)?;
         }
     }
 
@@ -176,31 +223,15 @@ pub fn load_elf_with_args(elf_bytes: &[u8], args: &[&str]) -> Result<LoadedProgr
                                 let i_memsz = i_phdr.p_memsz as usize;
                                 let i_filesz = i_phdr.p_filesz as usize;
 
-                                let num_pages = (i_memsz + 4095) / 4096;
-                                for p in 0..num_pages {
-                                    let page_vaddr = VirtAddr::new(i_vaddr + (p * 4096) as u64);
-                                    if let Some(phys_frame) = crate::mm::pmm::alloc_frame() {
-                                        let flags = PageTableFlags::PRESENT
-                                            | PageTableFlags::WRITABLE
-                                            | PageTableFlags::USER_ACCESSIBLE;
-                                        let _ = crate::mm::vmm::map_page(page_vaddr, phys_frame, flags);
-                                        unsafe {
-                                            core::ptr::write_bytes(phys_frame.as_u64() as *mut u8, 0, 4096);
-                                        }
-                                    }
-                                }
-
                                 let src_start = i_phdr.p_offset as usize;
                                 let src_end = src_start + i_filesz;
-                                if src_end <= interp_bytes.len() {
-                                    unsafe {
-                                        core::ptr::copy_nonoverlapping(
-                                            interp_bytes.as_ptr().add(src_start),
-                                            i_vaddr as *mut u8,
-                                            i_filesz,
-                                        );
-                                    }
-                                }
+                                let seg_bytes = if src_end <= interp_bytes.len() {
+                                    &interp_bytes[src_start..src_end]
+                                } else {
+                                    &[]
+                                };
+
+                                map_and_load_segment(pml4_phys, i_vaddr, i_memsz, i_filesz, seg_bytes)?;
                             }
                         }
                     }
@@ -214,52 +245,44 @@ pub fn load_elf_with_args(elf_bytes: &[u8], args: &[&str]) -> Result<LoadedProgr
         }
     }
 
-    // Allocate and map User Stack (64 KiB)
+    // Allocate and map isolated User Stack (64 KiB)
+    let user_stack_base = USER_STACK_BASE;
     let num_stack_pages = USER_STACK_SIZE / 4096;
     let mut stack_top_frame = 0u64;
     for p in 0..num_stack_pages {
-        let page_vaddr = VirtAddr::new(USER_STACK_BASE + (p * 4096) as u64);
+        let page_vaddr = VirtAddr::new(user_stack_base + (p * 4096) as u64);
         let phys_frame = crate::mm::pmm::alloc_frame().ok_or("Out of memory for user stack")?;
+        unsafe {
+            core::ptr::write_bytes(phys_frame.as_u64() as *mut u8, 0, 4096);
+        }
 
         let flags = PageTableFlags::PRESENT
             | PageTableFlags::WRITABLE
             | PageTableFlags::USER_ACCESSIBLE;
 
-        let _ = crate::mm::vmm::map_page(page_vaddr, phys_frame, flags);
-        unsafe {
-            core::ptr::write_bytes(phys_frame.as_u64() as *mut u8, 0, 4096);
-        }
+        crate::mm::vmm::map_page_in_pml4(pml4_phys, page_vaddr, phys_frame, flags)?;
         if p == num_stack_pages - 1 {
             stack_top_frame = phys_frame.as_u64();
         }
     }
 
-    let user_stack_top = USER_STACK_BASE + (USER_STACK_SIZE as u64) - 512;
+    let user_stack_top = user_stack_base + (USER_STACK_SIZE as u64) - 2048;
 
     // Set up standard Linux System V AMD64 initial user stack frame:
-    // [High Address]
-    // String Table (argv strings, envp strings, 16 random bytes for AT_RANDOM)
-    // ------------------------------------------------------------------------
-    // auxv pairs: AT_RANDOM, AT_ENTRY, AT_PAGESZ, AT_PHDR, AT_PHENT, AT_PHNUM, AT_UID, AT_GID, AT_NULL
-    // NULL (envp terminator)
-    // envp[N]... envp[0]
-    // NULL (argv terminator)
-    // argv[argc-1]... argv[0]
-    // argc
-    // [user_stack_top -> [rsp] = argc]
     unsafe {
-        let string_base = (stack_top_frame + 4096 - 256) as *mut u8;
-        let stack_ptr = (stack_top_frame + 4096 - 512) as *mut u64;
+        let string_base = (stack_top_frame + 4096 - 1024) as *mut u8;
+        let stack_ptr = (stack_top_frame + 4096 - 2048) as *mut u64;
+        let virt_string_base = user_stack_base + (USER_STACK_SIZE as u64) - 1024;
 
         let mut str_offset = 0usize;
         let mut argv_addrs = [0u64; 16];
 
         for (i, &arg) in args.iter().enumerate() {
-            if i < 16 && str_offset + arg.len() + 1 <= 128 {
+            if i < 16 && str_offset + arg.len() + 1 <= 512 {
                 let dst = string_base.add(str_offset);
                 core::ptr::copy_nonoverlapping(arg.as_ptr(), dst, arg.len());
                 *dst.add(arg.len()) = 0;
-                let virt_arg = (USER_STACK_BASE + (USER_STACK_SIZE as u64) - 256) + str_offset as u64;
+                let virt_arg = virt_string_base + str_offset as u64;
                 argv_addrs[i] = virt_arg;
                 str_offset += arg.len() + 1;
             }
@@ -279,10 +302,10 @@ pub fn load_elf_with_args(elf_bytes: &[u8], args: &[&str]) -> Result<LoadedProgr
         let mut env_count = 0;
 
         for (i, &env_bytes) in default_envs.iter().enumerate() {
-            if i < 8 && str_offset + env_bytes.len() <= 240 {
+            if i < 8 && str_offset + env_bytes.len() <= 900 {
                 let dst = string_base.add(str_offset);
                 core::ptr::copy_nonoverlapping(env_bytes.as_ptr(), dst, env_bytes.len());
-                let virt_env = (USER_STACK_BASE + (USER_STACK_SIZE as u64) - 256) + str_offset as u64;
+                let virt_env = virt_string_base + str_offset as u64;
                 env_addrs[i] = virt_env;
                 str_offset += env_bytes.len();
                 env_count += 1;
@@ -295,7 +318,7 @@ pub fn load_elf_with_args(elf_bytes: &[u8], args: &[&str]) -> Result<LoadedProgr
         for k in 0..16 {
             *random_dst.add(k) = (0x5A ^ (k as u8)).wrapping_add(0x13);
         }
-        let virt_random_ptr = (USER_STACK_BASE + (USER_STACK_SIZE as u64) - 256) + random_ptr_offset as u64;
+        let virt_random_ptr = virt_string_base + random_ptr_offset as u64;
 
         let argc = args.len().min(16);
         let mut idx = 0;
@@ -353,19 +376,23 @@ pub fn load_elf_with_args(elf_bytes: &[u8], args: &[&str]) -> Result<LoadedProgr
         }
     }
 
-    Ok(LoadedProgram {
-        entry_point: execution_entry,
-        user_stack_top,
-    })
+    Ok((
+        LoadedProgram {
+            entry_point: execution_entry,
+            user_stack_top,
+        },
+        proc_pml4_frame,
+    ))
 }
 
 fn elf_runner_trampoline() {
+    let tid = crate::task::scheduler::current_tid();
     let prog = {
-        let lock = CURRENT_ELF_EXEC.lock();
-        lock.expect("No ELF program loaded for execution")
+        let lock = ELF_EXEC_MAP.lock();
+        lock.get(&tid).copied().expect("No ELF program loaded for current thread")
     };
 
-    lunix_println!("  [USER] Transitioning CPU to Ring 3 at entry point 0x{:X}...", prog.entry_point);
+    lunix_println!("  [USER] Transitioning CPU to Ring 3 at entry point 0x{:X}, stack 0x{:X}...", prog.entry_point, prog.user_stack_top);
     unsafe {
         crate::task::user::enter_user_mode(prog.entry_point, prog.user_stack_top);
     }
@@ -380,18 +407,28 @@ pub fn exec_elf_with_args(path: &str, args: &[&str]) -> Result<usize, String> {
     let bytes = crate::fs::vfs::read_to_vec(path)
         .map_err(|e| alloc::format!("Failed to read '{}': {:?}", path, e))?;
 
-    let prog = load_elf_with_args(&bytes, args)
+    if bytes.starts_with(b"#!") {
+        let mut line_end = 2;
+        while line_end < bytes.len() && bytes[line_end] != b'\n' && bytes[line_end] != b'\r' {
+            line_end += 1;
+        }
+        let shebang_line = core::str::from_utf8(&bytes[2..line_end]).unwrap_or("/bin/sh").trim();
+        let interp = shebang_line.split_whitespace().next().unwrap_or("/bin/sh");
+        lunix_println!("  [SHEBANG] Executing script '{}' via interpreter '{}'...", path, interp);
+        return exec_elf_with_args(interp, &[interp, path]);
+    }
+
+    let is_init = path == "/sbin/init" || args.first().map(|s| *s == "init").unwrap_or(false);
+    let pid = if is_init { 1 } else { crate::task::scheduler::allocate_pid() };
+
+    let (prog, proc_pml4_frame) = load_elf_with_args(&bytes, args, pid)
         .map_err(|e| alloc::format!("ELF loader error: {}", e))?;
 
-    *CURRENT_ELF_EXEC.lock() = Some(prog);
-
-    let pid = crate::task::scheduler::allocate_pid();
-    let (cr3_frame, _) = x86_64::registers::control::Cr3::read();
-    let ppid = crate::task::scheduler::current_pid();
-    let proc = crate::task::process::Process::new_user(pid, ppid, path, cr3_frame.start_address().as_u64());
+    let ppid = if is_init { 0 } else { crate::task::scheduler::current_pid() };
+    let proc = crate::task::process::Process::new_user(pid, ppid, path, proc_pml4_frame.start_address().as_u64());
     crate::task::scheduler::register_process(proc);
 
-    if ppid != pid {
+    if ppid != pid && ppid > 0 {
         if let Some(parent_proc) = crate::task::scheduler::get_process(ppid) {
             parent_proc.lock().children.push(pid);
         }
@@ -399,7 +436,55 @@ pub fn exec_elf_with_args(path: &str, args: &[&str]) -> Result<usize, String> {
 
     lunix_println!("[+] Spawned Ring 3 ELF process (PID: {}, PPID: {})", pid, ppid);
     let tid = crate::task::scheduler::spawn_with_pid("elf_process", pid, elf_runner_trampoline, 8);
+    ELF_EXEC_MAP.lock().insert(tid, prog);
     Ok(tid)
+}
+
+pub fn exec_elf_replace(path: &str, args: &[&str]) -> Result<(), String> {
+    lunix_println!("[ELF] execve replacing image with binary '{}' from VFS...", path);
+    let bytes = crate::fs::vfs::read_to_vec(path)
+        .map_err(|e| alloc::format!("Failed to read '{}': {:?}", path, e))?;
+
+    if bytes.starts_with(b"#!") {
+        let mut line_end = 2;
+        while line_end < bytes.len() && bytes[line_end] != b'\n' && bytes[line_end] != b'\r' {
+            line_end += 1;
+        }
+        let shebang_line = core::str::from_utf8(&bytes[2..line_end]).unwrap_or("/bin/sh").trim();
+        let interp = shebang_line.split_whitespace().next().unwrap_or("/bin/sh");
+        lunix_println!("  [SHEBANG] Executing script '{}' via interpreter '{}'...", path, interp);
+        return exec_elf_replace(interp, &[interp, path]);
+    }
+
+    let current_pid = crate::task::scheduler::current_pid();
+    let (prog, proc_pml4_frame) = load_elf_with_args(&bytes, args, current_pid)
+        .map_err(|e| alloc::format!("ELF loader error: {}", e))?;
+
+    // Update current process PML4 CR3 and wake up any waiting vfork parent
+    if let Some(proc_arc) = crate::task::scheduler::get_current_process() {
+        let mut proc = proc_arc.lock();
+        proc.cr3 = proc_pml4_frame.start_address().as_u64();
+        proc.name = alloc::string::String::from(path);
+        if let Some(parent_tid) = proc.vfork_waiting_parent.take() {
+            crate::task::scheduler::unblock_thread(parent_tid);
+        }
+    }
+
+    // Switch active CR3 page table to new process image
+    unsafe {
+        x86_64::registers::control::Cr3::write(
+            proc_pml4_frame,
+            x86_64::registers::control::Cr3Flags::empty(),
+        );
+        // Reset FS_BASE to 0
+        crate::arch::x86_64::io::wrmsr(0xC000_0100, 0);
+    }
+    crate::task::scheduler::set_current_thread_fs_base(0);
+
+    lunix_println!("[+] execve image replaced successfully (PID {})! Transitioning to entry 0x{:X}...", current_pid, prog.entry_point);
+    unsafe {
+        crate::task::user::enter_user_mode(prog.entry_point, prog.user_stack_top);
+    }
 }
 
 

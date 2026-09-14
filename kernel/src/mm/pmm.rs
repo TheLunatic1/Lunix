@@ -108,10 +108,11 @@ pub fn init(boot_info: &BootInfo) {
         }
     }
 
-    // Protect first 1MB of physical memory (IVT, BDA, BIOS data)
-    for frame in 0..(0x100000 / PAGE_SIZE as usize) {
+    // Protect first 32 MB of physical memory (IVT, BDA, BIOS/UEFI firmware, and Identity-mapped low memory)
+    for frame in 0..(0x2000000 / PAGE_SIZE as usize) {
         pmm.set_frame_used(frame);
     }
+
 
     // Protect Kernel binary physical memory
     let kernel_start_frame = (boot_info.kernel_phys_base / PAGE_SIZE) as usize;

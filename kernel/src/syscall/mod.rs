@@ -20,9 +20,15 @@ pub const LINUX_SYS_RT_SIGACTION: usize = 13;
 pub const LINUX_SYS_RT_SIGPROCMASK: usize = 14;
 pub const LINUX_SYS_RT_SIGRETURN: usize = 15;
 pub const LINUX_SYS_IOCTL: usize = 16;
+pub const LINUX_SYS_PREAD64: usize = 17;
+pub const LINUX_SYS_PWRITE64: usize = 18;
+pub const LINUX_SYS_READV: usize = 19;
+pub const LINUX_SYS_WRITEV: usize = 20;
 pub const LINUX_SYS_ACCESS: usize = 21;
 pub const LINUX_SYS_PIPE: usize = 22;
+pub const LINUX_SYS_SELECT: usize = 23;
 pub const LINUX_SYS_SCHED_YIELD: usize = 24;
+pub const LINUX_SYS_MADVISE: usize = 28;
 pub const LINUX_SYS_DUP: usize = 32;
 pub const LINUX_SYS_DUP2: usize = 33;
 pub const LINUX_SYS_NANOSLEEP: usize = 35;
@@ -36,6 +42,7 @@ pub const LINUX_SYS_BIND: usize = 49;
 pub const LINUX_SYS_LISTEN: usize = 50;
 pub const LINUX_SYS_CLONE: usize = 56;
 pub const LINUX_SYS_FORK: usize = 57;
+pub const LINUX_SYS_VFORK: usize = 58;
 pub const LINUX_SYS_EXECVE: usize = 59;
 pub const LINUX_SYS_EXIT: usize = 60;
 pub const LINUX_SYS_WAIT4: usize = 61;
@@ -75,11 +82,14 @@ pub const LINUX_SYS_ARCH_PRCTL: usize = 158;
 pub const LINUX_SYS_SETRLIMIT: usize = 160;
 pub const LINUX_SYS_MOUNT: usize = 165;
 pub const LINUX_SYS_UMOUNT2: usize = 166;
+pub const LINUX_SYS_REBOOT: usize = 169;
+pub const LINUX_SYS_GETTID: usize = 186;
 pub const LINUX_SYS_FUTEX: usize = 202;
 pub const LINUX_SYS_GETDENTS64: usize = 217;
 pub const LINUX_SYS_SET_TID_ADDRESS: usize = 218;
 pub const LINUX_SYS_CLOCK_GETTIME: usize = 228;
 pub const LINUX_SYS_EXIT_GROUP: usize = 231;
+pub const LINUX_SYS_TGKILL: usize = 234;
 pub const LINUX_SYS_OPENAT: usize = 257;
 pub const LINUX_SYS_MKDIRAT: usize = 258;
 pub const LINUX_SYS_FSTATAT: usize = 262;
@@ -91,6 +101,7 @@ pub const LINUX_SYS_GET_ROBUST_LIST: usize = 274;
 pub const LINUX_SYS_DUP3: usize = 292;
 pub const LINUX_SYS_PIPE2: usize = 293;
 pub const LINUX_SYS_PRLIMIT64: usize = 302;
+pub const LINUX_SYS_GETRANDOM: usize = 318;
 pub const LINUX_SYS_RSEQ: usize = 334;
 
 // Linux arch_prctl codes
@@ -134,6 +145,7 @@ pub const WIN32_SYS_REGQUERYVALUEEX: usize = 0x101E;
 pub const WIN32_SYS_REGCLOSEKEY: usize = 0x101F;
 
 static USER_BRK: Mutex<u64> = Mutex::new(0x0000_6000_0000_0000);
+static USER_MMAP: Mutex<u64> = Mutex::new(0x0000_7000_0000_0000);
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -147,6 +159,13 @@ pub struct LinuxTimeSpec {
 pub struct LinuxTimeVal {
     pub tv_sec: i64,
     pub tv_usec: i64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct LinuxIoVec {
+    pub iov_base: *const u8,
+    pub iov_len: usize,
 }
 
 #[repr(C)]
@@ -239,10 +258,10 @@ pub extern "C" fn syscall_dispatcher(
         // Standard Linux syscalls
         LINUX_SYS_READ => sys_read(arg1 as usize, arg2 as *mut u8, arg3 as usize) as u64,
         LINUX_SYS_WRITE => sys_write(arg1 as usize, arg2 as *const u8, arg3 as usize) as u64,
-        LINUX_SYS_OPEN => sys_open(arg1 as *const u8, arg2 as usize, arg3 as u32) as u64,
+        LINUX_SYS_OPEN => sys_open(arg1 as *const u8, arg2 as u32, arg3 as u32) as u64,
         LINUX_SYS_CLOSE => sys_close(arg1 as usize) as u64,
-        LINUX_SYS_STAT => sys_stat(arg1 as *const u8, arg2 as usize) as u64,
-        LINUX_SYS_FSTAT => 0, // Success
+        LINUX_SYS_STAT => sys_stat(arg1 as *const u8, arg2 as *mut LinuxStat) as u64,
+        LINUX_SYS_FSTAT => sys_fstat(arg1 as usize, arg2 as *mut LinuxStat) as u64,
         LINUX_SYS_POLL => 1, // Ready
         LINUX_SYS_LSEEK => sys_lseek(arg1 as usize, arg2 as i64, arg3 as i32) as u64,
         LINUX_SYS_MMAP => sys_mmap(arg1, arg2, arg3 as u32, arg4 as u32, arg5 as i32, arg6) as u64,
@@ -253,9 +272,15 @@ pub extern "C" fn syscall_dispatcher(
         LINUX_SYS_RT_SIGPROCMASK => 0, // Signal mask set OK
         LINUX_SYS_RT_SIGRETURN => 0, // Signal return OK
         LINUX_SYS_IOCTL => sys_ioctl(arg1 as usize, arg2, arg3) as u64,
-        LINUX_SYS_ACCESS => sys_access(arg1 as *const u8, arg2 as usize, arg3 as u32) as u64,
+        LINUX_SYS_PREAD64 => sys_pread64(arg1 as usize, arg2 as *mut u8, arg3 as usize, arg4) as u64,
+        LINUX_SYS_PWRITE64 => sys_write(arg1 as usize, arg2 as *const u8, arg3 as usize) as u64,
+        LINUX_SYS_READV => sys_readv(arg1 as usize, arg2 as *const LinuxIoVec, arg3 as usize) as u64,
+        LINUX_SYS_WRITEV => sys_writev(arg1 as usize, arg2 as *const LinuxIoVec, arg3 as usize) as u64,
+        LINUX_SYS_ACCESS => sys_access(arg1 as *const u8, arg2 as u32) as u64,
         LINUX_SYS_PIPE => sys_pipe2(arg1 as *mut [i32; 2], 0) as u64,
+        LINUX_SYS_SELECT => 0,
         LINUX_SYS_SCHED_YIELD => sys_yield() as u64,
+        LINUX_SYS_MADVISE => 0,
         LINUX_SYS_DUP => sys_dup(arg1 as usize) as u64,
         LINUX_SYS_DUP2 => sys_dup2(arg1 as usize, arg2 as usize) as u64,
         LINUX_SYS_NANOSLEEP => sys_nanosleep(arg1 as *const LinuxTimeSpec) as u64,
@@ -269,6 +294,7 @@ pub extern "C" fn syscall_dispatcher(
         LINUX_SYS_LISTEN => 0,
         LINUX_SYS_CLONE => sys_clone(arg1, arg2) as u64,
         LINUX_SYS_FORK => sys_clone(0, 0) as u64,
+        LINUX_SYS_VFORK => sys_vfork() as u64,
         LINUX_SYS_EXECVE => sys_execve(arg1 as *const u8, arg2 as *const *const u8, arg3 as *const *const u8) as u64,
         LINUX_SYS_EXIT => sys_exit(arg1 as i32),
         LINUX_SYS_WAIT4 => sys_wait4(arg1 as isize, arg2 as *mut i32, arg3 as i32) as u64,
@@ -276,11 +302,11 @@ pub extern "C" fn syscall_dispatcher(
         LINUX_SYS_UNAME => sys_uname(arg1 as *mut LinuxUtsName) as u64,
         LINUX_SYS_FCNTL => sys_fcntl(arg1 as usize, arg2 as usize, arg3) as u64,
         LINUX_SYS_GETCWD => sys_getcwd(arg1 as *mut u8, arg2 as usize) as u64,
-        LINUX_SYS_CHDIR => sys_chdir(arg1 as *const u8, arg2 as usize) as u64,
+        LINUX_SYS_CHDIR => sys_chdir(arg1 as *const u8) as u64,
         LINUX_SYS_RENAME => sys_rename(arg1 as *const u8, arg2 as *const u8) as u64,
-        LINUX_SYS_MKDIR => sys_mkdir(arg1 as *const u8, arg2 as usize, arg3 as u32) as u64,
-        LINUX_SYS_RMDIR => sys_rmdir(arg1 as *const u8, arg2 as usize) as u64,
-        LINUX_SYS_UNLINK => sys_unlink(arg1 as *const u8, arg2 as usize) as u64,
+        LINUX_SYS_MKDIR => sys_mkdir(arg1 as *const u8, arg2 as u32) as u64,
+        LINUX_SYS_RMDIR => sys_rmdir(arg1 as *const u8) as u64,
+        LINUX_SYS_UNLINK => sys_unlink(arg1 as *const u8) as u64,
         LINUX_SYS_SYMLINK => 0,
         LINUX_SYS_READLINK => sys_readlink(arg1 as *const u8, arg2 as *mut u8, arg3 as usize) as u64,
         LINUX_SYS_CHMOD | LINUX_SYS_FCHMOD => 0,
@@ -298,11 +324,14 @@ pub extern "C" fn syscall_dispatcher(
         LINUX_SYS_SETRLIMIT => 0,
         LINUX_SYS_MOUNT => sys_mount(arg1 as *const u8, arg2 as *const u8, arg3 as *const u8, arg4, arg5 as *const u8) as u64,
         LINUX_SYS_UMOUNT2 => sys_umount2(arg1 as *const u8, arg2 as i32) as u64,
+        LINUX_SYS_REBOOT => 0,
+        LINUX_SYS_GETTID => sys_getpid() as u64,
         LINUX_SYS_FUTEX => sys_futex(arg1 as *const u32, arg2 as i32, arg3 as u32, arg4, arg5, arg6 as u32) as u64,
         LINUX_SYS_GETDENTS64 => sys_getdents64(arg1 as usize, arg2 as *mut u8, arg3 as usize) as u64,
         LINUX_SYS_SET_TID_ADDRESS => sys_set_tid_address(arg1 as *mut i32) as u64,
         LINUX_SYS_CLOCK_GETTIME => sys_clock_gettime(arg1 as i32, arg2 as *mut LinuxTimeSpec) as u64,
         LINUX_SYS_EXIT_GROUP => sys_exit(arg1 as i32),
+        LINUX_SYS_TGKILL => 0,
         LINUX_SYS_OPENAT => sys_openat(arg1 as i32, arg2 as *const u8, arg3 as u32) as u64,
         LINUX_SYS_MKDIRAT => sys_mkdirat(arg1 as i32, arg2 as *const u8, arg3 as u32) as u64,
         LINUX_SYS_FSTATAT => sys_fstatat(arg1 as i32, arg2 as *const u8, arg3 as *mut LinuxStat, arg4 as u32) as u64,
@@ -314,6 +343,7 @@ pub extern "C" fn syscall_dispatcher(
         LINUX_SYS_DUP3 => sys_dup3(arg1 as usize, arg2 as usize, arg3 as i32) as u64,
         LINUX_SYS_PIPE2 => sys_pipe2(arg1 as *mut [i32; 2], arg2 as i32) as u64,
         LINUX_SYS_PRLIMIT64 => sys_prlimit64(arg1 as i32, arg2 as u32, arg3 as *const LinuxRlimit, arg4 as *mut LinuxRlimit) as u64,
+        LINUX_SYS_GETRANDOM => sys_getrandom(arg1 as *mut u8, arg2 as usize, arg3 as u32) as u64,
         LINUX_SYS_RSEQ => 0,
 
         // Win32 User-Mode Subsystem syscalls
@@ -476,6 +506,12 @@ pub extern "C" fn syscall_dispatcher(
 
 pub fn sys_exit(code: i32) -> ! {
     let pid = crate::task::scheduler::current_pid();
+    if let Some(proc_arc) = crate::task::scheduler::get_current_process() {
+        let mut proc = proc_arc.lock();
+        if let Some(parent_tid) = proc.vfork_waiting_parent.take() {
+            crate::task::scheduler::unblock_thread(parent_tid);
+        }
+    }
     crate::task::scheduler::set_process_exit_code(pid, code);
     lunix_println!("  [SYSCALL] Process (PID {}) exited with status code: {}", pid, code);
     crate::drivers::keyboard::print_prompt();
@@ -564,7 +600,7 @@ pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> isize {
                 }
                 return -9;
             }
-            FdTarget::VfsHandle(ref handle) => {
+            FdTarget::VfsHandle { ref handle, .. } => {
                 let slice = unsafe { slice::from_raw_parts(buf, len) };
                 let mut h = handle.lock();
                 match h.write(slice) {
@@ -661,7 +697,7 @@ pub fn sys_read(fd: usize, buf: *mut u8, len: usize) -> isize {
                 }
                 return -9;
             }
-            FdTarget::VfsHandle(ref handle) => {
+            FdTarget::VfsHandle { ref handle, .. } => {
                 let slice = unsafe { slice::from_raw_parts_mut(buf, len) };
                 let mut h = handle.lock();
                 match h.read(slice) {
@@ -719,7 +755,7 @@ pub fn sys_lseek(fd: usize, offset: i64, whence: i32) -> isize {
                     *f_off = new_off as usize;
                     return new_off as isize;
                 }
-                FdTarget::VfsHandle(ref handle) => {
+                FdTarget::VfsHandle { ref handle, .. } => {
                     let mut h = handle.lock();
                     match h.seek(seek_from) {
                         Ok(pos) => return pos as isize,
@@ -732,52 +768,84 @@ pub fn sys_lseek(fd: usize, offset: i64, whence: i32) -> isize {
     }
     -9 // -EBADF
 }
-pub fn sys_open(path_ptr: *const u8, path_len: usize, flags: u32) -> isize {
-    if path_ptr.is_null() || path_len == 0 {
-        return -1;
-    }
 
-    let slice = unsafe { slice::from_raw_parts(path_ptr, path_len) };
-    if let Ok(path) = core::str::from_utf8(slice) {
-        if let Some(proc_arc) = crate::task::scheduler::get_current_process() {
-            let mut proc = proc_arc.lock();
-            // Check if directory
-            if let Ok(entries) = crate::fs::vfs::read_dir(path) {
-                if let Some(fd) = proc.allocate_fd(crate::task::process::FileDescriptor {
-                    target: FdTarget::Directory {
-                        path: alloc::string::String::from(path),
-                        entries,
-                        current_idx: 0,
-                    },
-                    flags,
-                }) {
-                    return fd as isize;
+pub fn sys_pread64(fd: usize, buf: *mut u8, count: usize, pos: u64) -> isize {
+    crate::lunix_serial_println!("  [SYS_PREAD64] fd={}, count={}, pos={}", fd, count, pos);
+    if buf.is_null() || count == 0 {
+        return 0;
+    }
+    if let Some(proc_arc) = crate::task::scheduler::get_current_process() {
+        let proc = proc_arc.lock();
+        if let Some(desc_arc) = proc.get_fd(fd) {
+            let desc = desc_arc.lock();
+            match desc.target {
+                FdTarget::File { ref data, .. } => {
+                    let off = pos as usize;
+                    if off >= data.len() {
+                        return 0;
+                    }
+                    let avail = data.len() - off;
+                    let to_read = count.min(avail);
+                    let slice = unsafe { core::slice::from_raw_parts_mut(buf, count) };
+                    slice[..to_read].copy_from_slice(&data[off..off + to_read]);
+                    return to_read as isize;
                 }
-            } else if let Ok(handle) = crate::fs::vfs::open(path) {
-                if let Some(fd) = proc.allocate_fd(crate::task::process::FileDescriptor {
-                    target: FdTarget::VfsHandle(alloc::sync::Arc::new(Mutex::new(handle))),
-                    flags,
-                }) {
-                    return fd as isize;
+                FdTarget::VfsHandle { ref handle, .. } => {
+                    let mut h = handle.lock();
+                    let orig_pos = h.seek(crate::fs::file::SeekFrom::Current(0)).unwrap_or(0);
+                    let _ = h.seek(crate::fs::file::SeekFrom::Start(pos));
+                    let slice = unsafe { core::slice::from_raw_parts_mut(buf, count) };
+                    let bytes_read = h.read(slice).unwrap_or(0);
+                    let _ = h.seek(crate::fs::file::SeekFrom::Start(orig_pos));
+                    return bytes_read as isize;
                 }
-            } else if let Ok(data) = crate::fs::vfs::read_to_vec(path) {
-                let size = data.len();
-                if let Some(fd) = proc.allocate_fd(crate::task::process::FileDescriptor {
-                    target: FdTarget::File {
-                        path: alloc::string::String::from(path),
-                        offset: 0,
-                        size,
-                        data,
-                    },
-                    flags,
-                }) {
-                    return fd as isize;
-                }
+                _ => return -9,
             }
         }
     }
+    -9
+}
 
-    -2 // -ENOENT
+pub fn sys_writev(fd: usize, iov_ptr: *const LinuxIoVec, iovcnt: usize) -> isize {
+    crate::lunix_serial_println!("  [SYS_WRITEV] fd={}, iovcnt={}", fd, iovcnt);
+    if iov_ptr.is_null() || iovcnt == 0 {
+        return 0;
+    }
+    let mut total_written = 0isize;
+    let iovs = unsafe { core::slice::from_raw_parts(iov_ptr, iovcnt) };
+    for iov in iovs {
+        if !iov.iov_base.is_null() && iov.iov_len > 0 {
+            let written = sys_write(fd, iov.iov_base, iov.iov_len);
+            if written > 0 {
+                total_written += written;
+            }
+        }
+    }
+    total_written
+}
+
+pub fn sys_readv(fd: usize, iov_ptr: *const LinuxIoVec, iovcnt: usize) -> isize {
+    crate::lunix_serial_println!("  [SYS_READV] fd={}, iovcnt={}", fd, iovcnt);
+    if iov_ptr.is_null() || iovcnt == 0 {
+        return 0;
+    }
+    let mut total_read = 0isize;
+    let iovs = unsafe { core::slice::from_raw_parts(iov_ptr, iovcnt) };
+    for iov in iovs {
+        if !iov.iov_base.is_null() && iov.iov_len > 0 {
+            let read_bytes = sys_read(fd, iov.iov_base as *mut u8, iov.iov_len);
+            if read_bytes > 0 {
+                total_read += read_bytes;
+            } else {
+                break;
+            }
+        }
+    }
+    total_read
+}
+
+pub fn sys_open(path_ptr: *const u8, flags: u32, _mode: u32) -> isize {
+    sys_openat(-100, path_ptr, flags)
 }
 
 pub fn sys_close(fd: usize) -> isize {
@@ -794,61 +862,99 @@ pub fn sys_close(fd: usize) -> isize {
     }
 }
 
-pub fn sys_stat(path_ptr: *const u8, path_len: usize) -> isize {
-    if path_ptr.is_null() || path_len == 0 {
-        return -1;
-    }
-
-    let slice = unsafe { slice::from_raw_parts(path_ptr, path_len) };
-    if let Ok(path) = core::str::from_utf8(slice) {
-        if let Ok(_inode) = crate::fs::vfs::stat(path) {
-            return 0; // Success
-        }
-    }
-
-    -2 // -ENOENT
+pub fn sys_stat(path_ptr: *const u8, statbuf: *mut LinuxStat) -> isize {
+    sys_fstatat(-100, path_ptr, statbuf, 0)
 }
 
-pub fn sys_mmap(addr: u64, length: u64, prot: u32, _flags: u32, fd: i32, offset: u64) -> u64 {
+pub fn sys_mmap(addr: u64, length: u64, _prot: u32, _flags: u32, fd: i32, offset: u64) -> u64 {
     let pages = (length + 4095) / 4096;
     let target_addr = if addr != 0 {
         addr
     } else {
-        // Allocate in user heap range
-        let mut brk_lock = USER_BRK.lock();
-        let alloc_addr = *brk_lock;
-        *brk_lock += pages * 4096;
+        // Allocate in user mmap range
+        let mut mmap_lock = USER_MMAP.lock();
+        let alloc_addr = *mmap_lock;
+        *mmap_lock += pages * 4096;
         alloc_addr
     };
 
-    let mut map_flags = x86_64::structures::paging::PageTableFlags::PRESENT
+    let map_flags = x86_64::structures::paging::PageTableFlags::PRESENT
+        | x86_64::structures::paging::PageTableFlags::WRITABLE
         | x86_64::structures::paging::PageTableFlags::USER_ACCESSIBLE;
-    if (prot & 0x2) != 0 || prot == 0 {
-        map_flags |= x86_64::structures::paging::PageTableFlags::WRITABLE;
-    }
 
-    for p in 0..pages {
-        if let Some(frame) = crate::mm::pmm::alloc_frame() {
-            let page_vaddr = x86_64::VirtAddr::new(target_addr + (p * 4096));
-            let _ = crate::mm::vmm::map_page(page_vaddr, frame, map_flags);
-            unsafe {
-                core::ptr::write_bytes(frame.as_u64() as *mut u8, 0, 4096);
-            }
-        }
-    }
-
-    // File-backed mapping
+    // Direct Framebuffer MMIO mapping check
     if fd >= 0 {
         if let Some(proc_arc) = crate::task::scheduler::get_current_process() {
             let proc = proc_arc.lock();
             if let Some(desc_arc) = proc.get_fd(fd as usize) {
                 let desc = desc_arc.lock();
+                if let FdTarget::VfsHandle { ref handle, .. } = desc.target {
+                    let h = handle.lock();
+                    let expected_fb_size = crate::display::console::get_framebuffer_info()
+                        .map(|fb| (fb.stride * fb.height * fb.bytes_per_pixel) as u64)
+                        .unwrap_or(0);
+                    if expected_fb_size > 0 && h.size() == expected_fb_size {
+                        if let Some(fb) = crate::display::console::get_framebuffer_info() {
+                            let fb_phys = fb.base_address + offset;
+                            for p in 0..pages {
+                                let page_vaddr = x86_64::VirtAddr::new(target_addr + (p * 4096));
+                                let phys_addr = x86_64::PhysAddr::new(fb_phys + (p * 4096));
+                                let _ = crate::mm::vmm::map_page(page_vaddr, phys_addr, map_flags);
+                            }
+                            return target_addr;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    for p in 0..pages {
+        let page_vaddr = x86_64::VirtAddr::new(target_addr + (p * 4096));
+        if !crate::mm::vmm::is_page_mapped(page_vaddr) {
+            if let Some(frame) = crate::mm::pmm::alloc_frame() {
+                if let Err(e) = crate::mm::vmm::map_page(page_vaddr, frame, map_flags) {
+                    crate::lunix_serial_println!("  [SYS_MMAP_ERR] failed to map page p={} (virt 0x{:X}): {}", p, page_vaddr.as_u64(), e);
+                } else {
+                    unsafe {
+                        core::ptr::write_bytes(page_vaddr.as_mut_ptr::<u8>(), 0, 4096);
+                    }
+                }
+            } else {
+                crate::lunix_serial_println!("  [SYS_MMAP_ERR] PMM out of frames for page p={}", p);
+            }
+        }
+        if p == 0 || p == 257 || p == 258 || p == 259 || p == pages - 1 {
+            crate::lunix_serial_println!("  [SYS_MMAP_PAGE_CHECK] p={}/{}, virt 0x{:X}, mapped={}", p, pages, page_vaddr.as_u64(), crate::mm::vmm::is_page_mapped(page_vaddr));
+        }
+    }
+
+
+    if fd < 0 {
+        unsafe {
+            core::ptr::write_bytes(target_addr as *mut u8, 0, length as usize);
+        }
+    } else {
+        // File-backed mapping
+        if let Some(proc_arc) = crate::task::scheduler::get_current_process() {
+            let proc = proc_arc.lock();
+            if let Some(desc_arc) = proc.get_fd(fd as usize) {
+                let desc = desc_arc.lock();
                 match desc.target {
-                    FdTarget::VfsHandle(ref handle) => {
+                    FdTarget::VfsHandle { ref handle, .. } => {
                         let mut h = handle.lock();
                         let _ = h.seek(crate::fs::file::SeekFrom::Start(offset));
                         let dest_slice = unsafe { core::slice::from_raw_parts_mut(target_addr as *mut u8, length as usize) };
-                        let _ = h.read(dest_slice);
+                        let bytes_read = h.read(dest_slice).unwrap_or(0);
+                        if bytes_read < length as usize {
+                            unsafe {
+                                core::ptr::write_bytes(
+                                    (target_addr as *mut u8).add(bytes_read),
+                                    0,
+                                    length as usize - bytes_read,
+                                );
+                            }
+                        }
                     }
                     FdTarget::File { ref data, .. } => {
                         let off = offset as usize;
@@ -860,6 +966,17 @@ pub fn sys_mmap(addr: u64, length: u64, prot: u32, _flags: u32, fd: i32, offset:
                                     target_addr as *mut u8,
                                     copy_len,
                                 );
+                                if copy_len < length as usize {
+                                    core::ptr::write_bytes(
+                                        (target_addr as *mut u8).add(copy_len),
+                                        0,
+                                        length as usize - copy_len,
+                                    );
+                                }
+                            }
+                        } else {
+                            unsafe {
+                                core::ptr::write_bytes(target_addr as *mut u8, 0, length as usize);
                             }
                         }
                     }
@@ -869,8 +986,11 @@ pub fn sys_mmap(addr: u64, length: u64, prot: u32, _flags: u32, fd: i32, offset:
         }
     }
 
+    crate::lunix_serial_println!("  [SYS_MMAP_DONE] target=0x{:X}, len=0x{:X}", target_addr, length);
+
     target_addr
 }
+
 
 pub fn sys_sysinfo(info: *mut LinuxSysInfo) -> isize {
     if info.is_null() {
@@ -955,6 +1075,204 @@ pub fn sys_munmap(_addr: u64, _length: u64) -> isize {
     0
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct FbBitfield {
+    pub offset: u32,
+    pub length: u32,
+    pub msb_right: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct FbVarScreenInfo {
+    pub xres: u32,
+    pub yres: u32,
+    pub xres_virtual: u32,
+    pub yres_virtual: u32,
+    pub xoffset: u32,
+    pub yoffset: u32,
+    pub bits_per_pixel: u32,
+    pub grayscale: u32,
+    pub red: FbBitfield,
+    pub green: FbBitfield,
+    pub blue: FbBitfield,
+    pub transp: FbBitfield,
+    pub nonstd: u32,
+    pub activate: u32,
+    pub height: u32,
+    pub width: u32,
+    pub accel_flags: u32,
+    pub pixclock: u32,
+    pub left_margin: u32,
+    pub right_margin: u32,
+    pub upper_margin: u32,
+    pub lower_margin: u32,
+    pub hsync_len: u32,
+    pub vsync_len: u32,
+    pub sync: u32,
+    pub vmode: u32,
+    pub rotate: u32,
+    pub colorspace: u32,
+    pub reserved: [u32; 4],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FbFixScreenInfo {
+    pub id: [u8; 16],
+    pub smem_start: u64,
+    pub smem_len: u32,
+    pub type_: u32,
+    pub type_aux: u32,
+    pub visual: u32,
+    pub xpanstep: u16,
+    pub ypanstep: u16,
+    pub ywrapstep: u16,
+    pub line_length: u32,
+    pub mmio_start: u64,
+    pub mmio_len: u32,
+    pub accel: u32,
+    pub capabilities: u16,
+    pub reserved: [u16; 2],
+}
+
+pub fn sys_ioctl(fd: usize, request: u64, arg: u64) -> isize {
+    const TIOCGWINSZ: u64 = 0x5413;
+    const TCGETS: u64 = 0x5401;
+    const TCSETS: u64 = 0x5402;
+    const TCSETSW: u64 = 0x5403;
+    const TCSETSF: u64 = 0x5404;
+    const FIONBIO: u64 = 0x5421;
+
+    // Framebuffer ioctls
+    const FBIOGET_VSCREENINFO: u64 = 0x4600;
+    const FBIOPUT_VSCREENINFO: u64 = 0x4601;
+    const FBIOGET_FSCREENINFO: u64 = 0x4602;
+
+    // Virtual terminal & keyboard mode ioctls
+    const VT_OPENQRY: u64 = 0x5600;
+    const VT_GETMODE: u64 = 0x5601;
+    const VT_SETMODE: u64 = 0x5602;
+    const VT_ACTIVATE: u64 = 0x5606;
+    const VT_WAITACTIVE: u64 = 0x5607;
+    const KDSETMODE: u64 = 0x4B3A;
+    const KDGETMODE: u64 = 0x4B3B;
+
+    match request {
+        TIOCGWINSZ => {
+            if arg == 0 {
+                return -14; // -EFAULT
+            }
+            #[repr(C)]
+            struct WinSize {
+                ws_row: u16,
+                ws_col: u16,
+                ws_xpixel: u16,
+                ws_ypixel: u16,
+            }
+            unsafe {
+                let ws = &mut *(arg as *mut WinSize);
+                ws.ws_row = 25;
+                ws.ws_col = 80;
+                ws.ws_xpixel = 640;
+                ws.ws_ypixel = 400;
+            }
+            0
+        }
+        FBIOGET_VSCREENINFO => {
+            if arg == 0 {
+                return -14;
+            }
+            let fb_info = crate::display::console::get_framebuffer_info();
+            let width = fb_info.map(|f| f.width as u32).unwrap_or(1024);
+            let height = fb_info.map(|f| f.height as u32).unwrap_or(768);
+            unsafe {
+                let vinfo = &mut *(arg as *mut FbVarScreenInfo);
+                vinfo.xres = width;
+                vinfo.yres = height;
+                vinfo.xres_virtual = width;
+                vinfo.yres_virtual = height;
+                vinfo.xoffset = 0;
+                vinfo.yoffset = 0;
+                vinfo.bits_per_pixel = 32;
+                vinfo.grayscale = 0;
+                vinfo.red = FbBitfield { offset: 16, length: 8, msb_right: 0 };
+                vinfo.green = FbBitfield { offset: 8, length: 8, msb_right: 0 };
+                vinfo.blue = FbBitfield { offset: 0, length: 8, msb_right: 0 };
+                vinfo.transp = FbBitfield { offset: 24, length: 8, msb_right: 0 };
+                vinfo.activate = 0;
+                vinfo.height = 0xFFFFFFFF;
+                vinfo.width = 0xFFFFFFFF;
+            }
+            0
+        }
+        FBIOPUT_VSCREENINFO => 0,
+        FBIOGET_FSCREENINFO => {
+            if arg == 0 {
+                return -14;
+            }
+            let fb_info = crate::display::console::get_framebuffer_info();
+            let base = fb_info.map(|f| f.base_address).unwrap_or(0);
+            let stride = fb_info.map(|f| f.stride as u32).unwrap_or(1024);
+            let height = fb_info.map(|f| f.height as u32).unwrap_or(768);
+            let bpp = fb_info.map(|f| f.bytes_per_pixel as u32).unwrap_or(4);
+            let smem_len = stride * height * bpp;
+            let line_length = stride * bpp;
+
+            unsafe {
+                let finfo = &mut *(arg as *mut FbFixScreenInfo);
+                finfo.id = *b"lunix-fb\0\0\0\0\0\0\0\0";
+                finfo.smem_start = base;
+                finfo.smem_len = smem_len;
+                finfo.type_ = 0; // FB_TYPE_PACKED_PIXELS
+                finfo.type_aux = 0;
+                finfo.visual = 2; // FB_VISUAL_TRUECOLOR
+                finfo.xpanstep = 0;
+                finfo.ypanstep = 0;
+                finfo.ywrapstep = 0;
+                finfo.line_length = line_length;
+                finfo.mmio_start = 0;
+                finfo.mmio_len = 0;
+                finfo.accel = 0; // FB_ACCEL_NONE
+            }
+            0
+        }
+        VT_OPENQRY => {
+            if arg != 0 {
+                unsafe { *(arg as *mut i32) = 1; }
+            }
+            0
+        }
+        VT_GETMODE | VT_SETMODE | VT_ACTIVATE | VT_WAITACTIVE | KDSETMODE => 0,
+        KDGETMODE => {
+            if arg != 0 {
+                unsafe { *(arg as *mut i32) = 0; } // KD_TEXT
+            }
+            0
+        }
+        TCGETS | TCSETS | TCSETSW | TCSETSF => 0,
+        FIONBIO => {
+            if arg != 0 {
+                let val = unsafe { *(arg as *const i32) };
+                if let Some(proc_arc) = crate::task::scheduler::get_current_process() {
+                    let proc = proc_arc.lock();
+                    if let Some(desc_arc) = proc.get_fd(fd) {
+                        let mut desc = desc_arc.lock();
+                        if val != 0 {
+                            desc.flags |= 0x800; // O_NONBLOCK
+                        } else {
+                            desc.flags &= !0x800;
+                        }
+                    }
+                }
+            }
+            0
+        }
+        _ => 0,
+    }
+}
+
 pub fn sys_brk(brk: u64) -> u64 {
     let mut current_brk = USER_BRK.lock();
     if brk == 0 {
@@ -1001,8 +1319,10 @@ pub fn sys_nanosleep(req: *const LinuxTimeSpec) -> isize {
 }
 
 pub fn sys_getpid() -> isize {
-    crate::task::scheduler::current_tid() as isize
+    let pid = crate::task::scheduler::current_pid();
+    if pid > 0 { pid as isize } else { 1 }
 }
+
 
 pub fn sys_uname(buf: *mut LinuxUtsName) -> isize {
     if buf.is_null() {
@@ -1011,15 +1331,28 @@ pub fn sys_uname(buf: *mut LinuxUtsName) -> isize {
 
     unsafe {
         let uts = &mut *buf;
-        copy_cstr(&mut uts.sysname, b"Lunix\0");
-        copy_cstr(&mut uts.nodename, b"lunix-os\0");
-        copy_cstr(&mut uts.release, b"0.1.0-hybrid\0");
-        copy_cstr(&mut uts.version, b"#1 SMP PREEMPT 2026-09-11\0");
+        copy_cstr(&mut uts.sysname, b"Linux\0");
+        copy_cstr(&mut uts.nodename, b"box\0");
+        copy_cstr(&mut uts.release, b"6.8.0-tinycore\0");
+        copy_cstr(&mut uts.version, b"#1 SMP PREEMPT 2026-09-14 (Lunix 0.1.0-hybrid)\0");
         copy_cstr(&mut uts.machine, b"x86_64\0");
         copy_cstr(&mut uts.domainname, b"(none)\0");
     }
 
     0
+}
+
+pub fn sys_getrandom(buf: *mut u8, buflen: usize, _flags: u32) -> isize {
+    if buf.is_null() {
+        return -14; // -EFAULT
+    }
+    let slice = unsafe { core::slice::from_raw_parts_mut(buf, buflen) };
+    let mut seed = unsafe { core::arch::x86_64::_rdtsc() };
+    for b in slice.iter_mut() {
+        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        *b = (seed >> 33) as u8;
+    }
+    buflen as isize
 }
 
 fn copy_cstr(dest: &mut [u8; 65], src: &[u8]) {
@@ -1029,57 +1362,6 @@ fn copy_cstr(dest: &mut [u8; 65], src: &[u8]) {
         }
     }
     dest[src.len().min(64)] = 0;
-}
-
-pub fn sys_ioctl(fd: usize, request: u64, arg: u64) -> isize {
-    const TIOCGWINSZ: u64 = 0x5413;
-    const TCGETS: u64 = 0x5401;
-    const TCSETS: u64 = 0x5402;
-    const TCSETSW: u64 = 0x5403;
-    const TCSETSF: u64 = 0x5404;
-    const FIONBIO: u64 = 0x5421;
-
-    match request {
-        TIOCGWINSZ => {
-            if arg == 0 {
-                return -14; // -EFAULT
-            }
-            #[repr(C)]
-            struct WinSize {
-                ws_row: u16,
-                ws_col: u16,
-                ws_xpixel: u16,
-                ws_ypixel: u16,
-            }
-            unsafe {
-                let ws = &mut *(arg as *mut WinSize);
-                ws.ws_row = 25;
-                ws.ws_col = 80;
-                ws.ws_xpixel = 640;
-                ws.ws_ypixel = 400;
-            }
-            0
-        }
-        TCGETS | TCSETS | TCSETSW | TCSETSF => 0,
-        FIONBIO => {
-            if arg != 0 {
-                let val = unsafe { *(arg as *const i32) };
-                if let Some(proc_arc) = crate::task::scheduler::get_current_process() {
-                    let proc = proc_arc.lock();
-                    if let Some(desc_arc) = proc.get_fd(fd) {
-                        let mut desc = desc_arc.lock();
-                        if val != 0 {
-                            desc.flags |= 0x800; // O_NONBLOCK
-                        } else {
-                            desc.flags &= !0x800;
-                        }
-                    }
-                }
-            }
-            0
-        }
-        _ => 0,
-    }
 }
 
 pub fn sys_fcntl(fd: usize, cmd: usize, arg: u64) -> isize {
@@ -1154,7 +1436,23 @@ pub fn sys_getcwd(buf: *mut u8, size: usize) -> isize {
     buf as isize
 }
 
-pub fn sys_chdir(_path_ptr: *const u8, _path_len: usize) -> isize {
+pub fn sys_chdir(path_ptr: *const u8) -> isize {
+    if path_ptr.is_null() {
+        return -14;
+    }
+    let mut len = 0;
+    unsafe {
+        while *path_ptr.add(len) != 0 && len < 256 {
+            len += 1;
+        }
+    }
+    let slice = unsafe { core::slice::from_raw_parts(path_ptr, len) };
+    if let Ok(path) = core::str::from_utf8(slice) {
+        if let Some(proc_arc) = crate::task::scheduler::get_current_process() {
+            let mut proc = proc_arc.lock();
+            proc.cwd = alloc::string::String::from(path);
+        }
+    }
     0
 }
 
@@ -1315,7 +1613,7 @@ pub fn sys_getdents64(fd: usize, dirp: *mut u8, count: usize) -> isize {
     written as isize
 }
 
-pub fn sys_execve(filename_ptr: *const u8, _argv_ptr: *const *const u8, _envp_ptr: *const *const u8) -> isize {
+pub fn sys_execve(filename_ptr: *const u8, argv_ptr: *const *const u8, _envp_ptr: *const *const u8) -> isize {
     if filename_ptr.is_null() {
         return -1;
     }
@@ -1328,76 +1626,143 @@ pub fn sys_execve(filename_ptr: *const u8, _argv_ptr: *const *const u8, _envp_pt
     }
 
     let slice = unsafe { core::slice::from_raw_parts(filename_ptr, len) };
-    if let Ok(path) = core::str::from_utf8(slice) {
-        match crate::task::elf::exec_elf(path) {
-            Ok(_) => {
-                crate::task::scheduler::exit_current_thread();
+    let path = match core::str::from_utf8(slice) {
+        Ok(p) => p,
+        Err(_) => return -1,
+    };
+
+    let mut args_vec: alloc::vec::Vec<alloc::string::String> = alloc::vec::Vec::new();
+    if !argv_ptr.is_null() {
+        let mut arg_idx = 0;
+        unsafe {
+            while arg_idx < 16 {
+                let arg_p = *argv_ptr.add(arg_idx);
+                if arg_p.is_null() {
+                    break;
+                }
+                let mut arg_len = 0;
+                while *arg_p.add(arg_len) != 0 && arg_len < 256 {
+                    arg_len += 1;
+                }
+                let arg_slice = core::slice::from_raw_parts(arg_p, arg_len);
+                if let Ok(arg_str) = core::str::from_utf8(arg_slice) {
+                    args_vec.push(alloc::string::String::from(arg_str));
+                }
+                arg_idx += 1;
             }
-            Err(_) => -1,
         }
-    } else {
-        -1
+    }
+
+    if args_vec.is_empty() {
+        args_vec.push(alloc::string::String::from(path));
+    }
+
+    let args_slices: alloc::vec::Vec<&str> = args_vec.iter().map(|s| s.as_str()).collect();
+
+    match crate::task::elf::exec_elf_replace(path, &args_slices) {
+        Ok(_) => 0,
+        Err(e) => {
+            crate::lunix_serial_println!("  [SYS_EXECVE] Failed: {}", e);
+            -1
+        }
     }
 }
 
-static CLONE_USER_STACK: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
-static CLONE_USER_ENTRY: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static THREAD_CLONE_MAP: Mutex<alloc::collections::BTreeMap<usize, crate::arch::x86_64::syscall::UserContext>> =
+    Mutex::new(alloc::collections::BTreeMap::new());
 
 fn clone_runner_trampoline() {
-    let stack = CLONE_USER_STACK.load(core::sync::atomic::Ordering::SeqCst);
-    let entry = CLONE_USER_ENTRY.load(core::sync::atomic::Ordering::SeqCst);
+    let tid = crate::task::scheduler::current_tid();
+    let ctx = {
+        let lock = THREAD_CLONE_MAP.lock();
+        lock.get(&tid).copied().expect("No clone context for child thread")
+    };
+
+    crate::lunix_serial_println!(
+        "  [CLONE_RUNNER] TID {} transitioning child to Ring 3 at entry 0x{:X}, stack 0x{:X}, fs_base 0x{:X} with RAX=0...",
+        tid, ctx.rip, ctx.rsp, ctx.fs_base
+    );
+
+    if ctx.fs_base != 0 {
+        unsafe {
+            crate::arch::x86_64::io::wrmsr(0xC000_0100, ctx.fs_base);
+        }
+    }
     unsafe {
-        crate::task::user::enter_user_mode_with_rax(entry, stack, 0);
+        crate::task::user::enter_user_mode_full(&ctx);
     }
 }
 
-pub fn sys_clone(_flags: u64, stack: u64) -> isize {
-    let current_pid = crate::task::scheduler::current_pid();
-    let child_pid = crate::task::scheduler::allocate_pid();
+pub fn sys_vfork() -> isize {
+    sys_clone(0x4111, 0)
+}
 
-    if let Some(parent_proc) = crate::task::scheduler::get_process(current_pid) {
-        let child_proc = parent_proc.lock().clone_process(child_pid);
+pub fn sys_clone(flags: u64, stack: u64) -> isize {
+    let parent_pid = crate::task::scheduler::current_pid();
+    let parent_tid = crate::task::scheduler::current_tid();
+    let child_pid = crate::task::scheduler::allocate_pid();
+    let is_vfork = (flags & 0x4000) != 0;
+
+    crate::lunix_serial_println!("  [SYS_CLONE] flags=0x{:X}, Parent PID {} (TID {}) spawning child PID {} (is_vfork={})...", flags, parent_pid, parent_tid, child_pid, is_vfork);
+
+    if let Some(parent_proc) = crate::task::scheduler::get_process(parent_pid) {
+        let mut child_proc = parent_proc.lock().clone_process(child_pid, is_vfork);
+        if is_vfork {
+            child_proc.vfork_waiting_parent = Some(parent_tid);
+        }
         crate::task::scheduler::register_process(child_proc);
         parent_proc.lock().children.push(child_pid);
     }
 
-    let return_rip = crate::arch::x86_64::syscall::LAST_USER_RIP.load(core::sync::atomic::Ordering::SeqCst);
-    let entry = if return_rip != 0 { return_rip } else { 0x400078 };
-    CLONE_USER_ENTRY.store(entry, core::sync::atomic::Ordering::SeqCst);
+    let mut ctx = *crate::arch::x86_64::syscall::CURRENT_USER_CONTEXT.lock();
+    if stack != 0 {
+        ctx.rsp = stack;
+    }
+    ctx.rax = 0; // Return 0 to child!
 
-    let user_stack = if stack != 0 {
-        stack
-    } else {
-        let last_rsp = crate::arch::x86_64::syscall::LAST_USER_RSP.load(core::sync::atomic::Ordering::SeqCst);
-        if last_rsp != 0 { last_rsp } else { crate::task::elf::USER_STACK_BASE + (crate::task::elf::USER_STACK_SIZE as u64) - 512 }
-    };
+    let child_tid = crate::task::scheduler::spawn_with_pid("user_clone", child_pid, clone_runner_trampoline, 8);
+    crate::task::scheduler::set_thread_fs_base(child_tid, ctx.fs_base);
+    THREAD_CLONE_MAP.lock().insert(child_tid, ctx);
 
-    CLONE_USER_STACK.store(user_stack, core::sync::atomic::Ordering::SeqCst);
-    let _tid = crate::task::scheduler::spawn_with_pid("user_fork", child_pid, clone_runner_trampoline, 6);
+    if is_vfork {
+        // Suspend calling parent thread until child calls execve or exit
+        crate::task::scheduler::block_current_thread();
+    }
+
     child_pid as isize
 }
 
-pub fn sys_wait4(pid: isize, status_ptr: *mut i32, _options: i32) -> isize {
+pub fn sys_wait4(pid: isize, status_ptr: *mut i32, options: i32) -> isize {
     let parent_pid = crate::task::scheduler::current_pid();
+    let is_nohang = (options & 1) != 0; // WNOHANG = 1
 
-    for _ in 0..100 {
+    loop {
         if let Some((child_pid, exit_code)) = crate::task::scheduler::reap_child_process(parent_pid, pid) {
             if !status_ptr.is_null() {
                 unsafe {
                     *status_ptr = (exit_code & 0xFF) << 8; // WEXITSTATUS format
                 }
             }
+            crate::lunix_serial_println!("  [SYS_WAIT4] Reaped child PID {} with exit_code {}", child_pid, exit_code);
             return child_pid as isize;
         }
+
+        let has_children = if let Some(parent_arc) = crate::task::scheduler::get_process(parent_pid) {
+            !parent_arc.lock().children.is_empty()
+        } else {
+            false
+        };
+
+        if !has_children {
+            return -10; // -ECHILD
+        }
+
+        if is_nohang {
+            return 0; // No child exited yet
+        }
+
         crate::task::scheduler::sleep_ms(10);
     }
-
-    if !status_ptr.is_null() {
-        unsafe {
-            *status_ptr = 0;
-        }
-    }
-    if pid > 0 { pid } else { 1 }
 }
 
 fn resolve_at_path(dfd: i32, path: &str) -> alloc::string::String {
@@ -1442,8 +1807,18 @@ pub fn sys_openat(dfd: i32, filename_ptr: *const u8, flags: u32) -> isize {
                 return fd as isize;
             }
         } else if let Ok(handle) = crate::fs::vfs::open(&resolved_path) {
+            let mut hash = 0x811c9dc5u64;
+            for b in resolved_path.as_bytes() {
+                hash ^= *b as u64;
+                hash = hash.wrapping_mul(0x1000193);
+            }
+            let ino = crate::fs::vfs::stat(&resolved_path).map(|i| if i.id != 0 { i.id } else { hash }).unwrap_or(hash);
             if let Some(fd) = proc.allocate_fd(crate::task::process::FileDescriptor {
-                target: FdTarget::VfsHandle(alloc::sync::Arc::new(Mutex::new(handle))),
+                target: FdTarget::VfsHandle {
+                    handle: alloc::sync::Arc::new(Mutex::new(handle)),
+                    path: resolved_path,
+                    inode_id: ino,
+                },
                 flags,
             }) {
                 return fd as isize;
@@ -1467,9 +1842,71 @@ pub fn sys_openat(dfd: i32, filename_ptr: *const u8, flags: u32) -> isize {
     -2 // -ENOENT
 }
 
-pub fn sys_fstatat(_dfd: i32, filename_ptr: *const u8, statbuf: *mut LinuxStat, _flags: u32) -> isize {
-    if filename_ptr.is_null() || statbuf.is_null() {
-        return -1;
+pub fn sys_fstat(fd: usize, statbuf: *mut LinuxStat) -> isize {
+    crate::lunix_serial_println!("  [SYS_FSTAT] fd={}", fd);
+    if statbuf.is_null() {
+        return -14; // -EFAULT
+    }
+    if let Some(proc_arc) = crate::task::scheduler::get_current_process() {
+        let proc = proc_arc.lock();
+        if let Some(desc_arc) = proc.get_fd(fd) {
+            let desc = desc_arc.lock();
+            let (size, is_dir, ino) = match desc.target {
+                FdTarget::File { ref path, size, .. } => {
+                    let mut hash = 0x811c9dc5u64;
+                    for b in path.as_bytes() {
+                        hash ^= *b as u64;
+                        hash = hash.wrapping_mul(0x1000193);
+                    }
+                    (size as i64, false, hash)
+                }
+                FdTarget::VfsHandle { ref handle, inode_id, .. } => {
+                    let h = handle.lock();
+                    let s = h.size() as i64;
+                    (s, false, inode_id)
+                }
+                FdTarget::Directory { ref path, .. } => {
+                    let mut hash = 0x811c9dc5u64;
+                    for b in path.as_bytes() {
+                        hash ^= *b as u64;
+                        hash = hash.wrapping_mul(0x1000193);
+                    }
+                    (4096, true, hash)
+                }
+                _ => (0, false, (fd as u64) + 2000),
+            };
+
+            unsafe {
+                let st = &mut *statbuf;
+                st.st_dev = 1;
+                st.st_ino = ino;
+                st.st_nlink = 1;
+                st.st_mode = if is_dir { 0o040755 } else { 0o100755 };
+                st.st_uid = 0;
+                st.st_gid = 0;
+                st.st_rdev = 0;
+                st.st_size = size;
+                st.st_blksize = 512;
+                st.st_blocks = (size + 511) / 512;
+                st.st_atime = 1726000000;
+                st.st_mtime = 1726000000;
+                st.st_ctime = 1726000000;
+            }
+            return 0;
+        }
+    }
+    -9 // -EBADF
+}
+
+pub fn sys_fstatat(dfd: i32, filename_ptr: *const u8, statbuf: *mut LinuxStat, flags: u32) -> isize {
+    if statbuf.is_null() {
+        return -14;
+    }
+    if filename_ptr.is_null() {
+        if dfd >= 0 {
+            return sys_fstat(dfd as usize, statbuf);
+        }
+        return -14;
     }
     let mut len = 0;
     unsafe {
@@ -1477,31 +1914,44 @@ pub fn sys_fstatat(_dfd: i32, filename_ptr: *const u8, statbuf: *mut LinuxStat, 
             len += 1;
         }
     }
-    let slice = unsafe { core::slice::from_raw_parts(filename_ptr, len) };
-    if let Ok(path) = core::str::from_utf8(slice) {
-        if let Ok(inode) = crate::fs::vfs::stat(path) {
-            unsafe {
-                let st = &mut *statbuf;
-                st.st_dev = 1;
-                st.st_ino = inode.id;
-                st.st_nlink = 1;
-                st.st_mode = if inode.node_type == crate::fs::inode::INodeType::Directory {
-                    0o040755 // S_IFDIR | 0755
-                } else {
-                    0o100755 // S_IFREG | 0755
-                };
-                st.st_uid = 0;
-                st.st_gid = 0;
-                st.st_rdev = 0;
-                st.st_size = inode.size as i64;
-                st.st_blksize = 512;
-                st.st_blocks = (inode.size as i64 + 511) / 512;
-                st.st_atime = 1726000000;
-                st.st_mtime = 1726000000;
-                st.st_ctime = 1726000000;
-            }
-            return 0;
+    if len == 0 || (flags & 0x1000) != 0 {
+        if dfd >= 0 {
+            return sys_fstat(dfd as usize, statbuf);
         }
+    }
+    let slice = unsafe { core::slice::from_raw_parts(filename_ptr, len) };
+    let path = match core::str::from_utf8(slice) {
+        Ok(p) => p,
+        Err(_) => return -2,
+    };
+    let resolved = resolve_at_path(dfd, path);
+    if let Ok(inode) = crate::fs::vfs::stat(&resolved) {
+        let mut hash = 0x811c9dc5u64;
+        for b in resolved.as_bytes() {
+            hash ^= *b as u64;
+            hash = hash.wrapping_mul(0x1000193);
+        }
+        unsafe {
+            let st = &mut *statbuf;
+            st.st_dev = 1;
+            st.st_ino = if inode.id != 0 { inode.id } else { hash };
+            st.st_nlink = 1;
+            st.st_mode = if inode.node_type == crate::fs::inode::INodeType::Directory {
+                0o040755
+            } else {
+                0o100755
+            };
+            st.st_uid = 0;
+            st.st_gid = 0;
+            st.st_rdev = 0;
+            st.st_size = inode.size as i64;
+            st.st_blksize = 512;
+            st.st_blocks = (inode.size as i64 + 511) / 512;
+            st.st_atime = 1726000000;
+            st.st_mtime = 1726000000;
+            st.st_ctime = 1726000000;
+        }
+        return 0;
     }
     -2 // -ENOENT
 }
@@ -1555,17 +2005,8 @@ pub fn sys_readlinkat(dfd: i32, filename_ptr: *const u8, buf: *mut u8, bufsiz: u
     -22 // -EINVAL
 }
 
-pub fn sys_access(path_ptr: *const u8, path_len: usize, _mode: u32) -> isize {
-    if path_ptr.is_null() || path_len == 0 {
-        return -14; // -EFAULT
-    }
-    let slice = unsafe { core::slice::from_raw_parts(path_ptr, path_len) };
-    if let Ok(path) = core::str::from_utf8(slice) {
-        if crate::fs::vfs::stat(path).is_ok() || crate::fs::vfs::read_dir(path).is_ok() {
-            return 0; // Accessible
-        }
-    }
-    -2 // -ENOENT
+pub fn sys_access(path_ptr: *const u8, mode: u32) -> isize {
+    sys_faccessat(-100, path_ptr, mode, 0)
 }
 
 pub fn sys_faccessat(dfd: i32, filename_ptr: *const u8, _mode: u32, _flags: u32) -> isize {
@@ -1595,6 +2036,7 @@ pub fn sys_arch_prctl(code: u64, addr: u64) -> isize {
             unsafe {
                 crate::arch::x86_64::io::wrmsr(0xC000_0100, addr);
             }
+            crate::task::scheduler::set_current_thread_fs_base(addr);
             0
         }
         ARCH_GET_FS => {
@@ -1707,11 +2149,8 @@ pub fn sys_getgroups(size: usize, list: *mut u32) -> isize {
     1
 }
 
-pub fn sys_mkdir(path_ptr: *const u8, path_len: usize, _mode: u32) -> isize {
-    if path_ptr.is_null() || path_len == 0 {
-        return -14;
-    }
-    0 // Mkdir OK
+pub fn sys_mkdir(path_ptr: *const u8, mode: u32) -> isize {
+    sys_mkdirat(-100, path_ptr, mode)
 }
 
 pub fn sys_mkdirat(_dfd: i32, filename_ptr: *const u8, _mode: u32) -> isize {
@@ -1721,11 +2160,8 @@ pub fn sys_mkdirat(_dfd: i32, filename_ptr: *const u8, _mode: u32) -> isize {
     0 // Mkdir OK
 }
 
-pub fn sys_unlink(path_ptr: *const u8, path_len: usize) -> isize {
-    if path_ptr.is_null() || path_len == 0 {
-        return -14;
-    }
-    0 // Unlink OK
+pub fn sys_unlink(path_ptr: *const u8) -> isize {
+    sys_unlinkat(-100, path_ptr, 0)
 }
 
 pub fn sys_unlinkat(_dfd: i32, filename_ptr: *const u8, _flags: u32) -> isize {
@@ -1735,10 +2171,7 @@ pub fn sys_unlinkat(_dfd: i32, filename_ptr: *const u8, _flags: u32) -> isize {
     0 // Unlink OK
 }
 
-pub fn sys_rmdir(path_ptr: *const u8, path_len: usize) -> isize {
-    if path_ptr.is_null() || path_len == 0 {
-        return -14;
-    }
+pub fn sys_rmdir(_path_ptr: *const u8) -> isize {
     0 // Rmdir OK
 }
 
