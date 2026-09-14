@@ -1,8 +1,11 @@
+pub mod driver_loader;
 pub mod hal;
 pub mod ntoskrnl;
 pub mod pe;
 pub mod types;
 pub mod win32;
+
+pub use driver_loader::{list_drivers, load_driver_from_vfs};
 
 use crate::lunix_println;
 use alloc::alloc::{alloc, Layout};

@@ -189,11 +189,17 @@ The kernel boots into an interactive graphical console with an IBM VGA font disp
 - `info`: Displays OS kernel and CPU architecture info
 - `mem`: Live breakdown of physical RAM (PMM/VMM)
 - `pci`: Scans and prints PCI bus hardware devices
-- `block`: Lists registered block devices (`/dev/sda`, etc.)
+- `block`: Lists registered block devices (`/dev/sda`, `/dev/ahci0`, `/dev/nvme0n1`, `/dev/vda`)
+- `storage`: Comprehensive storage controller breakdown (IDE, AHCI, NVMe, VirtIO)
+- `ahci`: Displays AHCI SATA controller ABAR MMIO, port status, and attached drives
+- `nvme`: Displays NVMe PCIe controller registers, queue pairs, and namespaces
+- `virtio`: Displays VirtIO devices (VirtIO-Block, VirtIO-Net) and queue ring topologies
 - `stat <path>`: Displays file or directory metadata
 - `smp`: Displays multi-core SMP and APIC status
 - `acpi`: Displays ACPI 2.0 tables and interrupt topology
 - `nt`: Displays Windows NT Subsystem and loaded driver status
+- `nt load <path.sys>`: Dynamically loads and binds a 64-bit PE32+ WDM driver in Ring 0
+- `nt list`: Displays active loaded Windows NT device drivers and dispatch routines
 - `spawn`: Spawns a preemptive background kernel worker thread
 - `sysdemo`: Executes Ring 3 User Mode demo via fast SYSCALL ABI
 - `gui`: Launches `LunixWM` 32-bit Graphical Window Compositor
@@ -306,6 +312,79 @@ The kernel boots into an interactive graphical console with an IBM VGA font disp
   - `WIN32_REGISTRY`: Hierarchical registry key/value database pre-populated with `HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion` and `HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment`.
   - Win32 DDI Shims: `GetEnvironmentVariableA` (0x101B), `SetEnvironmentVariableA` (0x101C), `RegOpenKeyExA` (0x101D), `RegQueryValueExA` (0x101E), `RegCloseKey` (0x101F).
   - Extended Win64 ABI thunk generator in `emit_win32_thunk` to unpack 5th and 6th parameters from `[RSP + 0x28]` and `[RSP + 0x30]`.
+
+### Phase 16: Milestone 4 — Real Linux Userspace Bootstrapping (BusyBox Rootfs, Signals & TLS)
+- **Thread-Local Storage (TLS) Subsystem**:
+  - Implemented `sys_arch_prctl` (158) with subfunctions `ARCH_SET_FS` (0x1002), `ARCH_GET_FS` (0x1003), `ARCH_SET_GS` (0x1001), `ARCH_GET_GS` (0x1004).
+  - Configures CPU MSR `0xC0000100` (`IA32_FS_BASE`) via direct `wrmsr`/`rdmsr`, establishing instantaneous musl/glibc `pthread_t` runtime compatibility with zero context switch overhead.
+- **Linux Signals & Signal Actions**:
+  - Implemented `sys_rt_sigaction` (13), `sys_rt_sigprocmask` (14), `sys_rt_sigreturn` (15), and `sys_kill` (62).
+- **Process Credentials & Process Groups**:
+  - Implemented `sys_getuid` (102), `sys_getgid` (104), `sys_geteuid` (107), `sys_getegid` (108), `sys_getgroups` (115), `sys_setpgid` (109), `sys_getpgid` (121), `sys_getpgrp` (111), and `sys_setsid` (112).
+- **Filesystem & Link Navigation**:
+  - Implemented `sys_access` (21) & `sys_faccessat` (269) for permission checks.
+  - Implemented `sys_readlink` (89) & `sys_readlinkat` (267) supporting `/proc/self/exe` resolution for multi-call binary self-discovery.
+  - Implemented `sys_statfs` (137) & `sys_fstatfs` (138) returning filesystem geometry and block statistics (`f_type=0x4006` FAT32).
+  - Implemented `sys_mprotect` (10), `sys_mkdir` (83), `sys_mkdirat` (258), `sys_unlink` (87), `sys_unlinkat` (263), `sys_rmdir` (84).
+- **Timing & Resource Limits**:
+  - Implemented `sys_clock_gettime` (228) and `sys_gettimeofday` (96) backed by 1000 Hz Local APIC timer ticks.
+  - Implemented `sys_getrlimit` (97), `sys_setrlimit` (160), and `sys_prlimit64` (302) with standard POSIX limits (`RLIMIT_NOFILE`, `RLIMIT_STACK`, `RLIMIT_AS`).
+- **Complete System V AMD64 ELF Stack Frame**:
+  - Enhanced `load_elf_with_args` to construct System V stack layout with `argc`, `argv`, `envp` (`PATH=/bin:/usr/bin`, `HOME=/root`, `USER=root`, `TERM=linux`, `SHELL=/bin/sh`, `PWD=/`), 16-byte random seed, and complete auxiliary vector pairs (`AT_PHDR`, `AT_PHENT`, `AT_PHNUM`, `AT_PAGESZ`, `AT_BASE`, `AT_FLAGS`, `AT_ENTRY`, `AT_UID`, `AT_EUID`, `AT_GID`, `AT_EGID`, `AT_CLKTCK`, `AT_RANDOM`, `AT_NULL`).
+- **BusyBox Userspace Multi-Call Distribution**:
+  - Embedded multi-call static `/bin/busybox`, `/bin/sh`, and test verification binary `/bin/test_busybox.elf` on the root FAT32 filesystem.
+  - Full suite verified 100% via `tests/test_milestone4.py` in QEMU.
+
+### Phase 17: Milestone 5 — Advanced Hardware Drivers & WDM Expansion
+- **Native AHCI 1.0 SATA Storage Subsystem**:
+  - Probes PCI class `0x01` subclass `0x06` prog-if `0x01` (e.g. Intel ICH9/ICH6 AHCI).
+  - Maps 32-bit/64-bit ABAR (BAR5) MMIO registers, resets HBA, configures GHC with AE/IE flags.
+  - Allocates Command Lists (32 headers), Received FIS structures, and Physical Region Descriptor Tables (PRDTs).
+  - Implements `BlockDevice` trait, registering high-speed SATA disk `/dev/ahci0` with DMA scatter-gather read/write.
+- **Native NVMe PCIe Solid-State Storage Subsystem**:
+  - Probes PCI class `0x01` subclass `0x08` prog-if `0x02` (NVMe controller).
+  - Maps 64-bit BAR0 MMIO space, checks CAP/VS, sets AQA, allocates Admin Submission/Completion Queues (ASQ/ACQ).
+  - Issues NVMe Controller Enable (`CC.EN=1`) with CSTS readiness polling.
+  - Discovers Namespaces via Admin Command `0x06` (Identify Namespace), creates I/O Queue Pairs (IOSQ/IOCQ), and registers `/dev/nvme0n1` implementing `BlockDevice` with Physical Region Page (PRP) DMA block transfers.
+- **Native VirtIO Virtualization Storage & Network Subsystem**:
+  - Probes VirtIO PCI Subsystem Vendor `0x1AF4` Device IDs (`0x1001` Block, `0x1000` Network).
+  - Configures Split VirtQueue ring buffers (`DescTable`, `AvailRing`, `UsedRing`).
+  - Registers `/dev/vda` (`VirtioBlkDevice`) implementing `BlockDevice` and network interface `VirtioNetDevice`.
+- **Expanded Windows NT Driver Model (WDM) Subsystem**:
+  - Added full NT synchronization primitives: `KEVENT` (`KeInitializeEvent`, `KeSetEvent`, `KeResetEvent`, `KeClearEvent`, `KeWaitForSingleObject`), `KMUTEX` (`KeInitializeMutex`, `KeReleaseMutex`).
+  - Added Device Stacks and Driver I/O: `IoCreateDevice`, `IoDeleteDevice`, `IoAttachDevice`, `IoAttachDeviceToDeviceStack`, `IoDetachDevice`, `IoAllocateIrp`, `IoFreeIrp`, `IoAllocateMdl`, `IoFreeMdl`, `MmProbeAndLockPages`, `MmUnlockPages`, `IoCompleteRequest`, `IoCallDriver`, `IoCreateSymbolicLink`, `IoDeleteSymbolicLink`, `DbgPrint`.
+  - Added HAL DDI shims: `HalTranslateBusAddress`, `HalAllocateCommonBuffer`, `HalFreeCommonBuffer`, `KeFlushWriteBuffer`.
+- **Dynamic PE32+ `.sys` Driver Loader**:
+  - Parses 64-bit PE/COFF headers from disk files (e.g. `/sys/drivers/sample_wdm.sys`), allocates executable memory frames, applies base relocations (`IMAGE_REL_BASED_DIR64`), binds `ntoskrnl.exe` and `hal.dll` IAT imports.
+  - Dynamically initializes `DRIVER_OBJECT`, populates major dispatch tables (`IRP_MJ_CREATE`, `IRP_MJ_READ`, `IRP_MJ_WRITE`, `IRP_MJ_DEVICE_CONTROL`), and calls `DriverEntry(DriverObject, RegistryPath)` directly in Ring 0 via Rust's native `extern "win64"` ABI.
+  - Fully automated and verified 100% via `tests/test_milestone5.py` and interactive shell commands (`storage`, `ahci`, `nvme`, `virtio`, `nt load <path.sys>`, `nt list`).
+
+### Phase 18: Milestone 6 — Real Tiny Core Linux Userspace Execution & VMware Workstation Support
+- **Dynamic ELF Interpreter & Loader Subsystem (`PT_INTERP`)**:
+  - Extended ELF64 parser to extract `PT_INTERP` program headers (e.g. `/lib/ld-linux-x86-64.so.2`).
+  - Reads interpreter binary from VFS and maps its segments at `INTERP_LOAD_BASE` (`0x0000_7FFF_E000_0000`).
+  - Automatically parses auxiliary vectors (`auxv`) on the user stack: `AT_BASE` (dynamic interpreter base), `AT_ENTRY` (application entry point), `AT_PHDR`, `AT_PHENT`, `AT_PHNUM`, `AT_PAGESZ`, `AT_RANDOM`, `AT_EXECFN`, `AT_NULL`.
+  - Dynamic linkers scan the auxv stack at startup, bind shared libraries (`libc.so.6`), and jump directly into the application main entry point.
+- **File-Backed `sys_mmap` (Syscall 9)**:
+  - Supports file-backed shared library memory mapping (`sys_mmap(addr, len, prot, flags, fd, offset)`), allowing dynamic linkers and C runtimes to load executable sections directly from VFS descriptors.
+- **C Runtime & System Control Syscalls**:
+  - Implemented `sys_sysinfo` (99) returning live physical memory totals, free memory, system uptime, and process count in `struct sysinfo`.
+  - Implemented `sys_set_tid_address` (218) for glibc/musl thread address space setup.
+  - Implemented `sys_set_robust_list` (273) and `sys_get_robust_list` (274) for robust futex list management.
+  - Implemented `sys_futex` (202) supporting `FUTEX_WAIT` and `FUTEX_WAKE` for zero-overhead fast user-space synchronization.
+  - Implemented `sys_mount` (165), `sys_umount2` (166), `sys_rseq` (334), and `sys_rename` (82).
+- **Tiny Core Linux Root Filesystem Layout**:
+  - Full distribution directory structure on `/dev/sda`: `/sbin/init` (PID 1), `/etc/inittab`, `/etc/init.d/rcS`, `/etc/passwd`, `/etc/group`, `/etc/issue`, `/etc/os-release`, `/etc/hostname`, `/home/tc/`, `/tmp/`, `/var/`, `/lib/ld-linux-x86-64.so.2`, `/lib/libc.so.6`, `/lib64/`.
+  - Added built-in interactive shell commands: `tinycore` (launches Tiny Core Linux userspace init sequence) and `init`.
+- **VMware Workstation Pro / Player VMDK Export**:
+  - Automated conversion of `target/lunix.img` to `target/lunix.vmdk` using `qemu-img.exe`.
+  - Run in VMware Workstation with VM Settings -> Options -> Advanced -> **Firmware type: UEFI**.
+  - Also generates `target/lunix.vdi` for VirtualBox.
+  - Dedicated build commands: `cargo run --package xtask -- vmdk`, `cargo run --package xtask -- vbox`, `cargo run --package xtask -- build`.
+- **Automated Verification**:
+  - `tests/test_milestone6.py` verified 100% (18/18 checks passed).
+  - Full regression test suite passing 100% (94/94 checks across Milestones 1 through 6).
+
 
 
 

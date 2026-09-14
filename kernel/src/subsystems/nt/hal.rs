@@ -1,6 +1,6 @@
 use crate::arch::x86_64::io::{inb, inl, inw, outb, outl, outw};
 use crate::drivers::pci;
-use crate::subsystems::nt::types::ULONG;
+use crate::subsystems::nt::types::*;
 use core::ffi::c_void;
 
 #[no_mangle]
@@ -77,3 +77,75 @@ pub unsafe extern "win64" fn HalGetBusDataByOffset(
 
     length
 }
+
+#[no_mangle]
+pub unsafe extern "win64" fn HalTranslateBusAddress(
+    interface_type: ULONG,
+    bus_number: ULONG,
+    bus_address: u64,
+    address_space: *mut ULONG,
+    translated_address: *mut u64,
+) -> BOOLEAN {
+    let _ = (interface_type, bus_number);
+    if translated_address.is_null() {
+        return 0;
+    }
+    *translated_address = bus_address; // In unified x86_64 physical memory space, direct 1:1 translation
+    if !address_space.is_null() {
+        *address_space = 0; // Memory space
+    }
+    lunix_serial_println!("[HAL] HalTranslateBusAddress(BusAddr=0x{:X}) -> 0x{:X}", bus_address, *translated_address);
+    1 // TRUE
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn HalAllocateCommonBuffer(
+    dma_adapter: *mut c_void,
+    length: ULONG,
+    logical_address: *mut u64,
+    cache_enabled: BOOLEAN,
+) -> *mut c_void {
+    use crate::mm::pmm;
+    let _ = (dma_adapter, cache_enabled);
+
+    let pages = ((length as usize) + 4095) / 4096;
+    let mut first_frame_phys = 0u64;
+
+    for i in 0..pages {
+        if let Some(frame) = pmm::alloc_frame() {
+            if i == 0 {
+                first_frame_phys = frame.as_u64();
+            }
+        } else {
+            return core::ptr::null_mut();
+        }
+    }
+
+    if !logical_address.is_null() {
+        *logical_address = first_frame_phys;
+    }
+
+    lunix_serial_println!("[HAL] HalAllocateCommonBuffer(Len={}) -> Phys=0x{:X}, Virt=0x{:X}",
+        length, first_frame_phys, first_frame_phys
+    );
+
+    first_frame_phys as *mut c_void
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn HalFreeCommonBuffer(
+    dma_adapter: *mut c_void,
+    length: ULONG,
+    logical_address: u64,
+    virtual_address: *mut c_void,
+    cache_enabled: BOOLEAN,
+) {
+    let _ = (dma_adapter, length, logical_address, virtual_address, cache_enabled);
+    lunix_serial_println!("[HAL] HalFreeCommonBuffer(Phys=0x{:X})", logical_address);
+}
+
+#[no_mangle]
+pub unsafe extern "win64" fn KeFlushWriteBuffer() {
+    core::arch::x86_64::_mm_mfence();
+}
+

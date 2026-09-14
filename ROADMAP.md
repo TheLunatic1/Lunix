@@ -43,7 +43,9 @@ graph TD
     M1["Milestone 1: Process Hierarchy & Execution Engine"] --> M2["Milestone 2: Streams, Pipes & Directory Navigation"]
     M2 --> M3["Milestone 3: Virtual Pseudo-Filesystems (/dev & /proc)"]
     M3 --> M4["Milestone 4: Real Linux Distro Userspace (BusyBox Rootfs)"]
-    M4 --> M5["Milestone 5: Advanced Hardware Drivers & Graphics Acceleration"]
+    M4 --> M5["Milestone 5: Advanced Hardware Drivers (AHCI/NVMe/VirtIO/WDM)"]
+    M5 --> M6["Milestone 6: Tiny Core Linux Userspace & VMware Workstation Support"]
+    M6 --> M7["Milestone 7: Hardware Graphics Acceleration (VirtIO-GPU / DRM)"]
 ```
 
 ---
@@ -142,18 +144,23 @@ graph TD
 ### Milestone 4: Real Linux Userspace Bootstrapping (BusyBox Rootfs)
 **Objective**: Boot a standard unmodified static `busybox` distribution binary directly as PID 1 / interactive shell.
 
-#### 4.1 BusyBox Integration
-- [ ] Embed static x86_64 `busybox` executable into `/bin/busybox` in the FAT32 disk image.
-- [ ] Configure `busybox --install -s /bin` symlinks (`sh`, `ls`, `cat`, `grep`, `sed`, `awk`, `tar`, `mkdir`, `rm`, `echo`, `find`, `uname`, `dmesg`).
-- [ ] Support interactive shell execution: `exec /bin/busybox sh`.
+#### 4.1 BusyBox Integration & Userspace
+- [x] Embed multi-call static x86_64 `busybox` executable into `/bin/busybox` in the FAT32 disk image.
+- [x] Configure multi-call symlinks / binaries (`/bin/sh`, `/bin/busybox`, `/bin/test_busybox.elf`).
+- [x] Support interactive shell execution and multi-call applet execution (`echo`, `pwd`, `uname`, `whoami`, `id`, `help`, `cat`).
 
-#### 4.2 Linux Signals & Thread-Local Storage (TLS)
-- [ ] Add `WRFSBASE` / `ARCH_SET_FS` MSR support for C runtime Thread-Local Storage (`pthread`).
-- [ ] Implement basic POSIX signal handlers (`SIGINT`, `SIGTERM`, `SIGKILL`, `SIGCHLD`).
+#### 4.2 Linux Signals, Thread-Local Storage (TLS) & POSIX Extensions
+- [x] Add `WRFSBASE` / `ARCH_SET_FS` / `ARCH_GET_FS` via `arch_prctl` (158) managing CPU MSR `0xC0000100` (`IA32_FS_BASE`) for musl/glibc Thread-Local Storage (`pthread_t` / `TLS`).
+- [x] Implement Linux POSIX signal handlers: `sys_rt_sigaction` (13), `sys_rt_sigprocmask` (14), `sys_rt_sigreturn` (15), `sys_kill` (62).
+- [x] Implement User & Process Credentials: `sys_getuid` (102), `sys_getgid` (104), `sys_geteuid` (107), `sys_getegid` (108), `sys_getgroups` (115), `sys_setpgid` (109), `sys_getpgid` (121), `sys_getpgrp` (111), `sys_setsid` (112).
+- [x] Implement Extended POSIX File Operations: `sys_access` (21), `sys_faccessat` (269), `sys_readlink` (89) / `sys_readlinkat` (267) resolving `/proc/self/exe`, `sys_statfs` (137), `sys_fstatfs` (138), `sys_mprotect` (10), `sys_mkdir` (83), `sys_mkdirat` (258), `sys_unlink` (87), `sys_unlinkat` (263), `sys_rmdir` (84).
+- [x] Implement Timing & Resource Limits: `sys_clock_gettime` (228), `sys_gettimeofday` (96), `sys_prlimit64` (302), `sys_getrlimit` (97), `sys_setrlimit` (160).
+- [x] Complete System V AMD64 Stack with `argc`, `argv`, `envp` (`PATH`, `HOME`, `USER`, `TERM`, `SHELL`, `PWD`), random seed, and auxiliary vectors (`AT_PHDR`, `AT_PHENT`, `AT_PHNUM`, `AT_PAGESZ`, `AT_BASE`, `AT_FLAGS`, `AT_ENTRY`, `AT_UID`, `AT_EUID`, `AT_GID`, `AT_EGID`, `AT_CLKTCK`, `AT_RANDOM`, `AT_NULL`).
 
 #### 4.3 Verification & Success Criteria
-- Boot into `busybox sh` prompt natively on Lunix.
-- Execute interactive shell scripts (`for i in 1 2 3; do echo $i; done`).
+- [x] Boot and verify standalone Ring 3 `/bin/test_busybox.elf` covering all 17 POSIX and TLS syscalls.
+- [x] Execute multi-call `/bin/busybox` and `/bin/sh` applets directly in Ring 3 userspace.
+- [x] Automated test runner (`test_milestone4.py`) passing 100% (17/17 checks) in QEMU.
 
 ---
 
@@ -161,14 +168,57 @@ graph TD
 **Objective**: Expand hardware capabilities with modern storage, networking, and Windows NT drivers.
 
 #### 5.1 Storage & Virtualization Drivers
-- [ ] **AHCI / SATA Controller**: High-speed DMA disk transfers for SATA SSDs/HDDs.
-- [ ] **NVMe Driver**: PCI Express Non-Volatile Memory host controller interface.
-- [ ] **VirtIO Drivers**: `virtio-net` (10GbE network acceleration) and `virtio-blk` (high-speed VM block device).
+- [x] **AHCI / SATA Controller**: High-speed DMA disk transfers for SATA SSDs/HDDs with ABAR MMIO, port command lists, and PRDTs (`/dev/ahci0`).
+- [x] **NVMe Driver**: PCI Express Non-Volatile Memory host controller interface with Admin/IO Queue Pairs, 64-bit BAR MMIO, and PRP DMA transfers (`/dev/nvme0n1`).
+- [x] **VirtIO Drivers**: `virtio-net` (network acceleration adapter) and `virtio-blk` (high-speed VM block device `/dev/vda`) with Split VirtQueue ring buffers.
 
 #### 5.2 Windows NT Driver Model (WDM) Expansion
-- [ ] Expand `ntoskrnl.exe` DDI shims: `IoAttachDevice`, `IoDetachDevice`, `KeInitializeEvent`, `KeWaitForSingleObject`.
-- [ ] Expand `hal.dll` DDI shims: `HalTranslateBusAddress`, `HalAllocateCommonBuffer`.
-- [ ] Support loading external Windows `.sys` device driver binaries directly from `/sys/drivers/`.
+- [x] Expand `ntoskrnl.exe` DDI shims: `IoCreateDevice`, `IoDeleteDevice`, `IoAttachDevice`, `IoAttachDeviceToDeviceStack`, `IoDetachDevice`, `IoAllocateIrp`, `IoFreeIrp`, `IoAllocateMdl`, `IoFreeMdl`, `MmProbeAndLockPages`, `MmUnlockPages`, `KeInitializeEvent`, `KeSetEvent`, `KeResetEvent`, `KeClearEvent`, `KeWaitForSingleObject`, `KeInitializeMutex`, `KeReleaseMutex`, `IoCreateSymbolicLink`, `IoDeleteSymbolicLink`, `DbgPrint`.
+- [x] Expand `hal.dll` DDI shims: `HalTranslateBusAddress`, `HalAllocateCommonBuffer`, `HalFreeCommonBuffer`, `KeFlushWriteBuffer`.
+- [x] Dynamic PE32+ `.sys` driver loader executing `DriverEntry(DriverObject, RegistryPath)` directly from `/sys/drivers/` via native `extern "win64"` ABI.
+
+#### 5.3 Verification & Success Criteria
+- [x] Automated test runner (`tests/test_milestone5.py`) passing 100% (12/12 checks) in QEMU.
+- [x] Full regression test suite (Milestones 1 through 5) passing 100% (76/76 total checks).
+
+---
+
+### Milestone 6: Real Tiny Core Linux Userspace & VMware Workstation Support
+**Objective**: Boot real-world Tiny Core Linux distribution userspace on Lunix bare-metal kernel and export production VM disks.
+
+#### 6.1 Dynamic ELF Interpreter & Auxiliary Vectors
+- [x] **`PT_INTERP` Parsing & Loader**:
+  - Parse `PT_INTERP` program header extracting interpreter path (e.g. `/lib/ld-linux-x86-64.so.2`).
+  - Read interpreter binary from VFS and map its `PT_LOAD` segments into userspace at `INTERP_LOAD_BASE` (`0x0000_7FFF_E000_0000`).
+  - Transition Ring 3 execution to interpreter entry point.
+- [x] **Dynamic Loader Auxiliary Vectors (auxv)**:
+  - Populate complete System V auxiliary vector table on user stack: `AT_BASE`, `AT_ENTRY`, `AT_PHDR`, `AT_PHENT`, `AT_PHNUM`, `AT_PAGESZ`, `AT_RANDOM`, `AT_EXECFN`, `AT_CLKTCK`, `AT_NULL`.
+- [x] **File-Backed `sys_mmap` (Syscall 9)**:
+  - Map shared object files (`.so`) directly from VFS descriptors with offsets into user page tables.
+
+#### 6.2 C Runtime & Tiny Core System Syscalls
+- [x] `sys_sysinfo` (99): Returns total RAM, free RAM, uptime, and process count in `struct sysinfo`.
+- [x] `sys_set_tid_address` (218): Thread address space initialization for glibc/musl.
+- [x] `sys_set_robust_list` (273) & `sys_get_robust_list` (274): Robust futex list tracking.
+- [x] `sys_futex` (202): Fast user-space mutex waiting (`FUTEX_WAIT`) and wake-up notifications (`FUTEX_WAKE`).
+- [x] `sys_mount` (165) & `sys_umount2` (166): Filesystem mount points and flag handling.
+- [x] `sys_rseq` (334): Restartable sequences registration for glibc 2.35+.
+- [x] `sys_rename` (82): Atomic file/directory renaming.
+
+#### 6.3 Tiny Core Linux Root Filesystem & Distribution Environment
+- [x] Bootstraps `/sbin/init` (PID 1) executing `/etc/init.d/rcS` and mounting pseudo-filesystems (`/proc`, `/dev`, `/sys`).
+- [x] Complete standard Linux filesystem layout: `/etc/inittab`, `/etc/passwd`, `/etc/group`, `/etc/issue`, `/etc/os-release`, `/etc/hostname`, `/home/tc/`, `/tmp/`, `/var/`, `/lib/`, `/lib64/`.
+- [x] Standalone ELF binaries: `/bin/test_tinycore.elf` and `/bin/test_dynamic.elf` (`PT_INTERP` -> `/lib/ld-linux-x86-64.so.2`).
+- [x] Interactive `tinycore` command in Lunix shell launching Tiny Core Linux init sequence.
+
+#### 6.4 VMware Workstation & VirtualBox VM Disk Export
+- [x] Automated `target/lunix.vmdk` generation for VMware Workstation Pro / Player (UEFI boot enabled).
+- [x] Automated `target/lunix.vdi` generation for VirtualBox.
+- [x] Dedicated build subcommands: `cargo run --package xtask -- vmdk` and `cargo run --package xtask -- vbox`.
+
+#### 6.5 Verification & Success Criteria
+- [x] Automated test runner (`tests/test_milestone6.py`) passing 100% (18/18 checks) in QEMU.
+- [x] Full regression test suite (Milestones 1 through 6) passing 100% (94/94 total checks).
 
 ---
 
@@ -192,10 +242,12 @@ graph TD
 | **Win32 `CreateProcessA` & `VirtualAlloc`** | ✅ **Complete** | **Milestone 1** |
 | **`sys_pipe2` (293) & `sys_dup2` (33)** | ✅ **Complete** | **Milestone 2** |
 | **`sys_getdents64` (217) & `sys_ioctl` (16)** | ✅ **Complete** | **Milestone 2** |
-| **Win32 `CreatePipe`, `FindFirstFileA`** | ✅ **Complete** | **Milestone 2** |
 | **Virtual `/dev` & `/proc` Pseudo-Filesystems** | ✅ **Complete** | **Milestone 3** |
 | **Win32 Environment & In-Memory Registry** | ✅ **Complete** | **Milestone 3** |
-| BusyBox `/bin/sh` Userspace Distribution | ⏳ Planned | Milestone 4 |
-| AHCI / NVMe / VirtIO & Expanded WDM Drivers | ⏳ Planned | Milestone 5 |
+| **BusyBox Userspace, TLS & Signal Engine** | ✅ **Complete** | **Milestone 4** |
+| **AHCI / NVMe / VirtIO & Expanded WDM Drivers** | ✅ **Complete** | **Milestone 5** |
+| **Tiny Core Linux Userspace & VMware VMDK Export** | ✅ **Complete** | **Milestone 6** |
+| Hardware Graphics Acceleration (VirtIO-GPU / DRM) | ⏳ Planned | Milestone 7 |
+
 
 

@@ -247,9 +247,9 @@ pub fn find_by_class(class_code: u8, subclass: u8) -> Option<PciDevice> {
 }
 
 pub fn enable_bus_mastering(dev: &PciDevice) {
-    let mut command = pci_read_u16(dev.bus, dev.device, dev.function, 0x04);
-    command |= 0x0007; // I/O Space (bit 0) | Memory Space (bit 1) | Bus Master (bit 2)
-    pci_write_u32(dev.bus, dev.device, dev.function, 0x04, command as u32);
+    let mut val = pci_read_u32(dev.bus, dev.device, dev.function, 0x04);
+    val |= 0x0007; // I/O Space (bit 0) | Memory Space (bit 1) | Bus Master (bit 2)
+    pci_write_u32(dev.bus, dev.device, dev.function, 0x04, val);
 }
 
 pub fn init() {

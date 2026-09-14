@@ -141,12 +141,18 @@ fn execute_command(cmd: &str) -> ExecResult {
             lunix_println!("  mem             - Display physical memory breakdown (PMM/VMM)");
             lunix_println!("  pci             - Scan and list hardware PCI bus devices");
             lunix_println!("  block           - List registered block storage devices");
+            lunix_println!("  storage         - Display storage controllers (ATA, AHCI, NVMe, VirtIO)");
+            lunix_println!("  ahci            - Display AHCI / SATA host controller details & ports");
+            lunix_println!("  nvme            - Display NVMe PCIe controller status & namespaces");
+            lunix_println!("  virtio          - Display VirtIO paravirtualized devices (blk & net)");
             lunix_println!("  stat <path>     - Display file or directory inode metadata");
             lunix_println!("  smp             - Display multi-core SMP and APIC status");
             lunix_println!("  acpi            - Display ACPI 2.0 tables and interrupt topology");
-            lunix_println!("  nt              - Display Windows NT Driver Subsystem status");
+            lunix_println!("  nt [load/list]  - Windows NT WDM driver management & live driver loading");
             lunix_println!("  spawn           - Spawn a preemptive background kernel worker thread");
             lunix_println!("  sysdemo         - Execute Ring 3 User Mode demo via fast SYSCALL ABI");
+            lunix_println!("  tinycore        - Bootstrap Tiny Core Linux Userspace Init Sequence (/sbin/init)");
+            lunix_println!("  init            - Execute PID 1 init process in Ring 3 userspace");
             lunix_println!("  gui             - Launch LunixWM 32-bit Graphical Window Compositor");
             lunix_println!("  clear           - Clear console screen buffer");
             lunix_println!("  reboot          - Soft reboot machine via 8042 controller");
@@ -238,9 +244,9 @@ fn execute_command(cmd: &str) -> ExecResult {
         }
         "uname" => {
             if arg1 == "-a" {
-                lunix_println!("Lunix lunix-os 0.1.0-hybrid #1 SMP PREEMPT 2026-09-11 x86_64 LunixOS GNU/Lunix");
+                lunix_println!("Linux lunix-box 6.8.0-tinycore (Lunix 0.1.0-hybrid) #1 SMP PREEMPT 2026-09-14 x86_64 TinyCore/Lunix GNU/Linux");
             } else {
-                lunix_println!("Lunix");
+                lunix_println!("Linux");
             }
         }
         "whoami" => {
@@ -467,12 +473,89 @@ fn execute_command(cmd: &str) -> ExecResult {
                 lunix_println!("ACPI tables not detected or uninitialized.");
             }
         }
+        "storage" => {
+            lunix_println!("=======================================================");
+            lunix_println!("           LUNIX STORAGE SUBSYSTEM STATUS              ");
+            lunix_println!("=======================================================");
+            lunix_println!("Storage Controllers & Drivers:");
+            lunix_println!("  ATA / IDE PIO Driver   : Active (/dev/sda)");
+            let ahci_init = crate::drivers::storage::ahci::AHCI_INITIALIZED.load(core::sync::atomic::Ordering::Relaxed);
+            let nvme_init = crate::drivers::storage::nvme::NVME_INITIALIZED.load(core::sync::atomic::Ordering::Relaxed);
+            let virtio_blk_init = crate::drivers::virtio::blk::VIRTIO_BLK_INITIALIZED.load(core::sync::atomic::Ordering::Relaxed);
+            lunix_println!("  AHCI SATA 1.0 Driver   : {}", if ahci_init { "Active (DMA Enabled)" } else { "Standby / Probed" });
+            lunix_println!("  NVMe PCIe SSD Driver   : {}", if nvme_init { "Active (PRP DMA Enabled)" } else { "Standby / Probed" });
+            lunix_println!("  VirtIO-Block Driver    : {}", if virtio_blk_init { "Active (VirtQueue Ring Enabled)" } else { "Standby / Probed" });
+            lunix_println!("");
+            let devices = crate::fs::block::list_block_devices();
+            lunix_println!("Registered Block Devices ({}):", devices.len());
+            for dev_name in devices {
+                if let Some(dev) = crate::fs::block::get_block_device(&dev_name) {
+                    lunix_println!("  /dev/{:<8} : {:>8} blocks ({:>4} MB) [BlockSize: {} B]",
+                        dev_name,
+                        dev.total_blocks(),
+                        (dev.total_blocks() * dev.block_size() as u64) / (1024 * 1024),
+                        dev.block_size()
+                    );
+                }
+            }
+        }
+        "ahci" => {
+            let ahci_init = crate::drivers::storage::ahci::AHCI_INITIALIZED.load(core::sync::atomic::Ordering::Relaxed);
+            lunix_println!("AHCI SATA Host Controller Status:");
+            lunix_println!("  Driver Status: {}", if ahci_init { "Active" } else { "Probed (PCI Class 01:06)" });
+            let devs = crate::drivers::storage::ahci::AHCI_DEVICES.lock();
+            lunix_println!("  Active Drives: {}", devs.len());
+            for dev in devs.iter() {
+                lunix_println!("    Drive /dev/{:<6} Port {} - {} MB",
+                    dev.name, dev.port_idx, (dev.total_sectors * 512) / (1024 * 1024)
+                );
+            }
+        }
+        "nvme" => {
+            let nvme_init = crate::drivers::storage::nvme::NVME_INITIALIZED.load(core::sync::atomic::Ordering::Relaxed);
+            lunix_println!("NVM Express (NVMe) PCIe Storage Status:");
+            lunix_println!("  Driver Status: {}", if nvme_init { "Active" } else { "Probed (PCI Class 01:08)" });
+            let devs = crate::drivers::storage::nvme::NVME_DEVICES.lock();
+            lunix_println!("  Namespaces   : {}", devs.len());
+            for dev in devs.iter() {
+                lunix_println!("    Namespace /dev/{:<8} - {} MB (LBA: {} B)",
+                    dev.name, (dev.total_sectors * dev.sector_size as u64) / (1024 * 1024), dev.sector_size
+                );
+            }
+        }
+        "virtio" => {
+            let blk_init = crate::drivers::virtio::blk::VIRTIO_BLK_INITIALIZED.load(core::sync::atomic::Ordering::Relaxed);
+            let net_init = crate::drivers::virtio::net::VIRTIO_NET_INITIALIZED.load(core::sync::atomic::Ordering::Relaxed);
+            lunix_println!("VirtIO Paravirtualization Devices:");
+            lunix_println!("  virtio-blk : {}", if blk_init { "Active (/dev/vda)" } else { "Not Present" });
+            lunix_println!("  virtio-net : {}", if net_init { "Active (VirtQueue Ring)" } else { "Not Present" });
+        }
         "nt" => {
-            lunix_println!("Windows NT Subsystem Status:");
-            lunix_println!("  Core API Exports: ntoskrnl.exe & hal.dll (extern \"win64\" ABI)");
-            lunix_println!("  Loaded Drivers  : \\Driver\\SampleLunixDriver (WDM)");
-            lunix_println!("  Created Devices : \\Device\\LunixSampleDevice0");
-            lunix_println!("  IRP Support     : MJ_CREATE, MJ_CLOSE, MJ_DEVICE_CONTROL");
+            if arg1 == "load" {
+                if arg2.is_empty() {
+                    lunix_println!("Usage: nt load <path.sys>");
+                    return ExecResult::Done;
+                }
+                let resolved = resolve_path(&cwd, arg2);
+                match crate::subsystems::nt::load_driver_from_vfs(&resolved) {
+                    Ok(_) => {
+                        lunix_println!("Windows NT driver '{}' loaded successfully.", resolved);
+                    }
+                    Err(e) => {
+                        lunix_println!("nt load: failed to load '{}': {}", resolved, e);
+                    }
+                }
+            } else if arg1 == "list" || arg1 == "drivers" {
+                crate::subsystems::nt::list_drivers();
+            } else {
+                lunix_println!("Windows NT Subsystem Status:");
+                lunix_println!("  Core API Exports: ntoskrnl.exe & hal.dll (extern \"win64\" ABI)");
+                lunix_println!("  Loaded Drivers  : \\Driver\\SampleLunixDriver (WDM)");
+                lunix_println!("  Created Devices : \\Device\\LunixSampleDevice0");
+                lunix_println!("  IRP Support     : MJ_CREATE, MJ_CLOSE, MJ_DEVICE_CONTROL, MJ_PNP, MJ_POWER");
+                lunix_println!("  DDI Extensions  : KeInitializeEvent, HalAllocateCommonBuffer, IoAttachDevice");
+                lunix_println!("  Commands        : 'nt list' (view drivers), 'nt load <path.sys>' (load driver)");
+            }
         }
         "ps" => {
             let threads = crate::task::scheduler::list_threads();
@@ -515,6 +598,26 @@ fn execute_command(cmd: &str) -> ExecResult {
             lunix_println!("Launching Ring 3 User Mode demo with Fast SYSCALL ABI...");
             run_user_mode_demo();
             return ExecResult::AsyncProcessSpawned;
+        }
+        "tinycore" | "init" => {
+            lunix_println!("=======================================================");
+            lunix_println!("  TINY CORE LINUX USERSPACE (PID 1 BOOT SEQUENCE)     ");
+            lunix_println!("=======================================================");
+            let init_path = if crate::fs::vfs::stat("/sbin/init").is_ok() {
+                "/sbin/init"
+            } else if crate::fs::vfs::stat("/bin/sh").is_ok() {
+                "/bin/sh"
+            } else {
+                "/bin/busybox"
+            };
+            match crate::task::elf::exec_elf_with_args(init_path, &[init_path]) {
+                Ok(_) => {
+                    return ExecResult::AsyncProcessSpawned;
+                }
+                Err(e) => {
+                    lunix_println!("init: failed to launch '{}': {}", init_path, e);
+                }
+            }
         }
         "gui" => {
             lunix_println!("Launching LunixWM 32-bit Graphical Window Compositor...");

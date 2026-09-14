@@ -47,7 +47,6 @@ pub const ERROR_SUCCESS: u32 = 0;
 pub const ERROR_FILE_NOT_FOUND: u32 = 2;
 pub const ERROR_INVALID_PARAMETER: u32 = 87;
 pub const ERROR_MORE_DATA: u32 = 234;
-
 // Win32 Find Data
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -121,6 +120,7 @@ static WIN32_USER_HEAP: Mutex<u64> = Mutex::new(0x0000_7000_0000_0000);
 static WIN32_CMDLINE: Mutex<String> = Mutex::new(String::new());
 static WIN32_SEARCHES: Mutex<Vec<Win32FindSearch>> = Mutex::new(Vec::new());
 static NEXT_SEARCH_ID: AtomicUsize = AtomicUsize::new(0x3000);
+
 
 // In-Memory Environment & Registry Storage
 static WIN32_ENV: Mutex<Option<BTreeMap<String, String>>> = Mutex::new(None);
@@ -702,6 +702,7 @@ unsafe fn fill_find_data(dest: *mut Win32FindDataA, entry: &crate::fs::file::Dir
     data.c_file_name[copy_len] = 0;
 }
 
+
 pub fn sys_win32_get_environment_variable(
     lp_name: *const u8,
     lp_buffer: *mut u8,
@@ -941,7 +942,6 @@ pub fn resolve_win32_symbol(dll: &str, symbol: &str) -> Option<usize> {
         || dll.eq_ignore_ascii_case("api-ms-win-core-memory-l1-1-0.dll")
         || dll.eq_ignore_ascii_case("api-ms-win-core-file-l1-1-0.dll")
         || dll.eq_ignore_ascii_case("api-ms-win-core-handle-l1-1-0.dll");
-
     let is_advapi32 = dll.eq_ignore_ascii_case("advapi32.dll")
         || dll.eq_ignore_ascii_case("advapi32")
         || dll.eq_ignore_ascii_case("api-ms-win-core-registry-l1-1-0.dll");

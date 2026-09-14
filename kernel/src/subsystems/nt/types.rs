@@ -79,8 +79,96 @@ pub type PDRIVER_DISPATCH = unsafe extern "win64" fn(
     irp: PIRP,
 ) -> NTSTATUS;
 
+pub const IRP_MJ_CREATE: usize = 0;
+pub const IRP_MJ_CREATE_NAMED_PIPE: usize = 1;
+pub const IRP_MJ_CLOSE: usize = 2;
+pub const IRP_MJ_READ: usize = 3;
+pub const IRP_MJ_WRITE: usize = 4;
+pub const IRP_MJ_QUERY_INFORMATION: usize = 5;
+pub const IRP_MJ_SET_INFORMATION: usize = 6;
+pub const IRP_MJ_QUERY_EA: usize = 7;
+pub const IRP_MJ_SET_EA: usize = 8;
+pub const IRP_MJ_FLUSH_BUFFERS: usize = 9;
+pub const IRP_MJ_QUERY_VOLUME_INFORMATION: usize = 10;
+pub const IRP_MJ_SET_VOLUME_INFORMATION: usize = 11;
+pub const IRP_MJ_DIRECTORY_CONTROL: usize = 12;
+pub const IRP_MJ_FILE_SYSTEM_CONTROL: usize = 13;
+pub const IRP_MJ_DEVICE_CONTROL: usize = 14;
+pub const IRP_MJ_INTERNAL_DEVICE_CONTROL: usize = 15;
+pub const IRP_MJ_SHUTDOWN: usize = 16;
+pub const IRP_MJ_LOCK_CONTROL: usize = 17;
+pub const IRP_MJ_CLEANUP: usize = 18;
+pub const IRP_MJ_CREATE_MAILSLOT: usize = 19;
+pub const IRP_MJ_QUERY_SECURITY: usize = 20;
+pub const IRP_MJ_SET_SECURITY: usize = 21;
+pub const IRP_MJ_POWER: usize = 22;
+pub const IRP_MJ_SYSTEM_CONTROL: usize = 23;
+pub const IRP_MJ_DEVICE_CHANGE: usize = 24;
+pub const IRP_MJ_QUERY_QUOTA: usize = 25;
+pub const IRP_MJ_SET_QUOTA: usize = 26;
+pub const IRP_MJ_PNP: usize = 27;
 pub const IRP_MJ_MAXIMUM_FUNCTION: usize = 28;
 
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EVENT_TYPE {
+    NotificationEvent = 0,
+    SynchronizationEvent = 1,
+}
+
+#[repr(C)]
+pub struct DISPATCHER_HEADER {
+    pub type_code: u8,
+    pub absolute: u8,
+    pub size: u8,
+    pub inserted: u8,
+    pub signal_state: i32,
+    pub wait_list_head: [usize; 2],
+}
+
+#[repr(C)]
+pub struct KEVENT {
+    pub header: DISPATCHER_HEADER,
+}
+
+pub type PKEVENT = *mut KEVENT;
+
+#[repr(C)]
+pub struct KMUTEX {
+    pub header: DISPATCHER_HEADER,
+    pub mutant_list_entry: [usize; 2],
+    pub owner_thread: PVOID,
+    pub abandoned: BOOLEAN,
+    pub apc_disable: u8,
+}
+
+pub type PKMUTEX = *mut KMUTEX;
+
+pub type LARGE_INTEGER = i64;
+pub type PLARGE_INTEGER = *mut LARGE_INTEGER;
+pub type PHYSICAL_ADDRESS = u64;
+
+#[repr(C)]
+pub struct MDL {
+    pub next: *mut MDL,
+    pub size: i16,
+    pub mdl_flags: i16,
+    pub process: PVOID,
+    pub mapped_system_va: PVOID,
+    pub start_va: PVOID,
+    pub byte_count: ULONG,
+    pub byte_offset: ULONG,
+}
+
+pub type PMDL = *mut MDL;
+
+#[repr(C)]
+pub struct IO_STATUS_BLOCK {
+    pub status: NTSTATUS,
+    pub information: ULONG_PTR,
+}
+
+pub type PIO_STATUS_BLOCK = *mut IO_STATUS_BLOCK;
 
 #[repr(C)]
 pub struct DRIVER_OBJECT {
@@ -134,11 +222,11 @@ pub struct DEVICE_OBJECT {
 pub struct IRP {
     pub type_code: i16,
     pub size: u16,
-    pub mdl_address: PVOID,
+    pub mdl_address: PMDL,
     pub flags: ULONG,
     pub associated_irp: PVOID,
     pub thread_list_entry: [usize; 2],
-    pub io_status: [usize; 2],
+    pub io_status: IO_STATUS_BLOCK,
     pub requestor_mode: i8,
     pub pending_returned: BOOLEAN,
     pub stack_count: i8,
@@ -148,3 +236,4 @@ pub struct IRP {
     pub user_buffer: PVOID,
     pub tail: [usize; 8],
 }
+

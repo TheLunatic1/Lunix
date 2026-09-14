@@ -4,6 +4,7 @@ pub mod net;
 pub mod pci;
 pub mod storage;
 pub mod timer;
+pub mod virtio;
 
 pub fn init() {
     timer::init();
@@ -12,4 +13,6 @@ pub fn init() {
     pci::init();
     storage::init();
     net::init();
+    virtio::init();
 }
+
