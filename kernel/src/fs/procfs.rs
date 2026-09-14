@@ -28,10 +28,10 @@ impl ProcFs {
     }
 
     fn generate_meminfo() -> String {
-        let total_bytes = pmm::total_memory_bytes();
-        let usable_bytes = pmm::usable_memory_bytes();
+        let (total_bytes, usable_bytes, used_bytes) = pmm::get_memory_stats();
         let total_kb = total_bytes / 1024;
-        let free_kb = usable_bytes / 1024;
+        let free_bytes = usable_bytes.saturating_sub(used_bytes);
+        let free_kb = free_bytes / 1024;
 
         format!(
             "MemTotal:       {:8} kB\n\
@@ -46,7 +46,7 @@ impl ProcFs {
     }
 
     fn generate_cpuinfo() -> String {
-        let cores = crate::arch::x86_64::smp::get_core_count().max(1);
+        let cores = crate::arch::x86_64::smp::CPU_COUNT.load(core::sync::atomic::Ordering::Relaxed).max(1);
         let mut out = String::new();
 
         for c in 0..cores {

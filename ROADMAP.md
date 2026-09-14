@@ -114,26 +114,28 @@ graph TD
 **Objective**: Provide standard virtual files and system info required by C standard libraries (musl, glibc, MSVC CRT).
 
 #### 3.1 Linux `/dev` Character Devices
-- [ ] `/dev/null`: Read returns EOF (0 bytes); write discards all input and returns buffer length.
-- [ ] `/dev/zero`: Read fills buffer with `0x00`; write discards input.
-- [ ] `/dev/urandom`: Read generates random bytes from RDRAND/RDSEED or PRNG.
-- [ ] `/dev/tty`: Directly routes reads/writes to the active graphical framebuffer console and serial COM1.
+- [x] `/dev/null`: Read returns EOF (0 bytes); write discards all input and returns buffer length.
+- [x] `/dev/zero`: Read fills buffer with `0x00`; write discards input.
+- [x] `/dev/urandom`: Read generates random bytes from PRNG (rdtsc + xorshift).
+- [x] `/dev/tty`: Directly routes reads/writes to the active graphical framebuffer console and serial COM1.
 
 #### 3.2 Linux `/proc` Virtual Information Nodes
-- [ ] `/proc/version`: Outputs `Linux version 6.8.0-lunix-hybrid (root@lunix) (rustc 1.85.0-nightly)`.
-- [ ] `/proc/meminfo`: Outputs `MemTotal`, `MemFree`, `MemAvailable`, `Buffers`, `Cached` parsed live from PMM and Heap stats.
-- [ ] `/proc/cpuinfo`: Outputs processor model, core count, flags (SSE, AVX, APIC).
-- [ ] `/proc/mounts`: Outputs root mount `/dev/sda / fat32 rw 0 0`.
+- [x] `/proc/version`: Outputs `Linux version 6.8.0-lunix-hybrid (root@lunix) (rustc 1.85.0-nightly)`.
+- [x] `/proc/meminfo`: Outputs `MemTotal`, `MemFree`, `MemAvailable`, `Buffers`, `Cached` parsed live from PMM and Heap stats.
+- [x] `/proc/cpuinfo`: Outputs processor model, core count, flags (SSE, AVX, APIC).
+- [x] `/proc/mounts`: Outputs root mount `/dev/sda / fat32 rw 0 0`.
+- [x] `/proc/uptime`: Outputs system uptime in seconds from APIC timer ticks.
 
 #### 3.3 Windows Environment & Registry Emulation
-- [ ] **Win32 Environment Block**:
-  - `GetEnvironmentVariableA` & `SetEnvironmentVariableA`: Live environment variable store (`PATH`, `TEMP`, `SYSTEMROOT`).
-- [ ] **In-Memory Registry**:
-  - `RegOpenKeyExA`, `RegQueryValueExA`, `RegCloseKey`: Read basic hardware and configuration keys in RAM.
+- [x] **Win32 Environment Block**:
+  - `GetEnvironmentVariableA` & `SetEnvironmentVariableA`: Live environment variable store (`PATH`, `TEMP`, `SYSTEMROOT`, `OS`, `PROCESSOR_ARCHITECTURE`).
+- [x] **In-Memory Registry**:
+  - `RegOpenKeyExA`, `RegQueryValueExA`, `RegCloseKey`: Read and query hardware and configuration keys in RAM (`HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion`, `HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment`).
 
 #### 3.4 Verification & Success Criteria
-- Verify `cat /proc/meminfo` displays dynamic physical RAM numbers.
-- Verify `cat /dev/zero | head -c 10` produces 10 null bytes.
+- [x] Verify `cat /proc/meminfo` displays dynamic physical RAM numbers.
+- [x] Verify `cat /dev/zero` and `cat /dev/null` stream correctly.
+- [x] Automated test runner (`test_milestone3.py`) verifies all `/dev`, `/proc`, and Win32 registry/environment calls.
 
 ---
 
@@ -191,7 +193,9 @@ graph TD
 | **`sys_pipe2` (293) & `sys_dup2` (33)** | ✅ **Complete** | **Milestone 2** |
 | **`sys_getdents64` (217) & `sys_ioctl` (16)** | ✅ **Complete** | **Milestone 2** |
 | **Win32 `CreatePipe`, `FindFirstFileA`** | ✅ **Complete** | **Milestone 2** |
-| Virtual `/dev` & `/proc` Pseudo-Filesystems | ⏳ Planned | Milestone 3 |
+| **Virtual `/dev` & `/proc` Pseudo-Filesystems** | ✅ **Complete** | **Milestone 3** |
+| **Win32 Environment & In-Memory Registry** | ✅ **Complete** | **Milestone 3** |
 | BusyBox `/bin/sh` Userspace Distribution | ⏳ Planned | Milestone 4 |
 | AHCI / NVMe / VirtIO & Expanded WDM Drivers | ⏳ Planned | Milestone 5 |
+
 

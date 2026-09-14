@@ -3,6 +3,7 @@
 //! Provides PE32+ Windows 64-bit executable loader, IAT resolution for kernel32.dll / ntdll.dll,
 //! Win32 API shims, anonymous pipes, file streaming, directory searching, and user-mode execution via extern "win64" ABI.
 
+use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicUsize, Ordering};
@@ -27,6 +28,25 @@ pub const FILE_ATTRIBUTE_READONLY: u32 = 0x01;
 pub const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
 pub const FILE_ATTRIBUTE_ARCHIVE: u32 = 0x20;
 pub const FILE_ATTRIBUTE_NORMAL: u32 = 0x80;
+
+// Win32 Registry Constants
+pub const HKEY_CLASSES_ROOT: u64 = 0x8000_0000;
+pub const HKEY_CURRENT_USER: u64 = 0x8000_0001;
+pub const HKEY_LOCAL_MACHINE: u64 = 0x8000_0002;
+pub const HKEY_USERS: u64 = 0x8000_0003;
+
+pub const REG_NONE: u32 = 0;
+pub const REG_SZ: u32 = 1;
+pub const REG_EXPAND_SZ: u32 = 2;
+pub const REG_BINARY: u32 = 3;
+pub const REG_DWORD: u32 = 4;
+pub const REG_MULTI_SZ: u32 = 7;
+pub const REG_QWORD: u32 = 11;
+
+pub const ERROR_SUCCESS: u32 = 0;
+pub const ERROR_FILE_NOT_FOUND: u32 = 2;
+pub const ERROR_INVALID_PARAMETER: u32 = 87;
+pub const ERROR_MORE_DATA: u32 = 234;
 
 // Win32 Find Data
 #[repr(C)]
@@ -102,6 +122,60 @@ static WIN32_CMDLINE: Mutex<String> = Mutex::new(String::new());
 static WIN32_SEARCHES: Mutex<Vec<Win32FindSearch>> = Mutex::new(Vec::new());
 static NEXT_SEARCH_ID: AtomicUsize = AtomicUsize::new(0x3000);
 
+// In-Memory Environment & Registry Storage
+static WIN32_ENV: Mutex<Option<BTreeMap<String, String>>> = Mutex::new(None);
+static WIN32_REGISTRY: Mutex<Option<BTreeMap<String, BTreeMap<String, (u32, Vec<u8>)>>>> = Mutex::new(None);
+static WIN32_OPEN_REG_KEYS: Mutex<BTreeMap<u64, String>> = Mutex::new(BTreeMap::new());
+static NEXT_REG_HANDLE: AtomicUsize = AtomicUsize::new(0x4000);
+
+fn get_win32_env_map() -> spin::MutexGuard<'static, Option<BTreeMap<String, String>>> {
+    let mut lock = WIN32_ENV.lock();
+    if lock.is_none() {
+        let mut map = BTreeMap::new();
+        map.insert(String::from("OS"), String::from("Windows_NT"));
+        map.insert(String::from("PROCESSOR_ARCHITECTURE"), String::from("AMD64"));
+        map.insert(String::from("NUMBER_OF_PROCESSORS"), String::from("2"));
+        map.insert(String::from("PATH"), String::from("C:\\Windows\\system32;C:\\Windows;C:\\bin"));
+        map.insert(String::from("SYSTEMROOT"), String::from("C:\\Windows"));
+        map.insert(String::from("WINDIR"), String::from("C:\\Windows"));
+        map.insert(String::from("USERPROFILE"), String::from("C:\\Users\\Lunix"));
+        map.insert(String::from("USERNAME"), String::from("LunixUser"));
+        map.insert(String::from("COMPUTERNAME"), String::from("LUNIX-PC"));
+        map.insert(String::from("TEMP"), String::from("C:\\Temp"));
+        map.insert(String::from("TMP"), String::from("C:\\Temp"));
+        map.insert(String::from("PROMPT"), String::from("$P$G"));
+        *lock = Some(map);
+    }
+    lock
+}
+
+fn get_win32_registry() -> spin::MutexGuard<'static, Option<BTreeMap<String, BTreeMap<String, (u32, Vec<u8>)>>>> {
+    let mut lock = WIN32_REGISTRY.lock();
+    if lock.is_none() {
+        let mut reg = BTreeMap::new();
+
+        // Populate HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion
+        let mut cv = BTreeMap::new();
+        cv.insert(String::from("PRODUCTNAME"), (REG_SZ, b"Lunix NT 10.0 (x86_64 Hybrid OS)\0".to_vec()));
+        cv.insert(String::from("CURRENTVERSION"), (REG_SZ, b"10.0\0".to_vec()));
+        cv.insert(String::from("CURRENTBUILD"), (REG_SZ, b"26100\0".to_vec()));
+        cv.insert(String::from("REGISTEREDOWNER"), (REG_SZ, b"Lunix Administrator\0".to_vec()));
+        cv.insert(String::from("SYSTEMROOT"), (REG_SZ, b"C:\\Windows\0".to_vec()));
+        reg.insert(String::from("HKLM\\SOFTWARE\\MICROSOFT\\WINDOWS NT\\CURRENTVERSION"), cv);
+
+        // Populate HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment
+        let mut env_key = BTreeMap::new();
+        env_key.insert(String::from("OS"), (REG_SZ, b"Windows_NT\0".to_vec()));
+        env_key.insert(String::from("PROCESSOR_ARCHITECTURE"), (REG_SZ, b"AMD64\0".to_vec()));
+        env_key.insert(String::from("NUMBER_OF_PROCESSORS"), (REG_SZ, b"2\0".to_vec()));
+        env_key.insert(String::from("PATH"), (REG_SZ, b"C:\\Windows\\system32;C:\\Windows\0".to_vec()));
+        reg.insert(String::from("HKLM\\SYSTEM\\CURRENTCONTROLSET\\CONTROL\\SESSION MANAGER\\ENVIRONMENT"), env_key);
+
+        *lock = Some(reg);
+    }
+    lock
+}
+
 // Win32 VDSO User-Mode Thunk Base (Ring 3 accessible)
 pub const WIN32_VDSO_BASE: u64 = 0x0000_7FFF_1000_0000;
 
@@ -132,6 +206,11 @@ pub const THUNK_CLOSE_HANDLE: usize = 23 * 32;
 pub const THUNK_FIND_FIRST_FILE_A: usize = 24 * 32;
 pub const THUNK_FIND_NEXT_FILE_A: usize = 25 * 32;
 pub const THUNK_FIND_CLOSE: usize = 26 * 32;
+pub const THUNK_GET_ENVIRONMENT_VARIABLE_A: usize = 27 * 32;
+pub const THUNK_SET_ENVIRONMENT_VARIABLE_A: usize = 28 * 32;
+pub const THUNK_REG_OPEN_KEY_EX_A: usize = 29 * 32;
+pub const THUNK_REG_QUERY_VALUE_EX_A: usize = 30 * 32;
+pub const THUNK_REG_CLOSE_KEY: usize = 31 * 32;
 
 fn emit_win32_thunk(buf: &mut [u8; 4096], offset: usize, syscall_id: u32) {
     // Generates a 64-bit user-mode thunk stub translating Win64 calling convention to Syscall ABI:
@@ -139,20 +218,24 @@ fn emit_win32_thunk(buf: &mut [u8; 4096], offset: usize, syscall_id: u32) {
     // 2. mov rsi, rdx              -> 48 89 D6 (arg2)
     // 3. mov rdx, r8               -> 4C 89 C2 (arg3)
     // 4. mov rdi, rcx              -> 48 89 CF (arg1)
-    // 5. mov eax, syscall_id       -> B8 <4 bytes LE>
-    // 6. syscall                   -> 0F 05
-    // 7. ret                       -> C3
+    // 5. mov r8, [rsp + 0x28]      -> 4C 8B 44 24 28 (arg5 from win64 stack)
+    // 6. mov r9, [rsp + 0x30]      -> 4C 8B 4C 24 30 (arg6 from win64 stack)
+    // 7. mov eax, syscall_id       -> B8 <4 bytes LE>
+    // 8. syscall                   -> 0F 05
+    // 9. ret                       -> C3
     let mut code = [
         0x4D, 0x89, 0xCA,             // 0..3:  mov r10, r9
         0x48, 0x89, 0xD6,             // 3..6:  mov rsi, rdx
         0x4C, 0x89, 0xC2,             // 6..9:  mov rdx, r8
         0x48, 0x89, 0xCF,             // 9..12: mov rdi, rcx
-        0xB8, 0x00, 0x00, 0x00, 0x00, // 12..17: mov eax, imm32
-        0x0F, 0x05,                   // 17..19: syscall
-        0xC3,                         // 19..20: ret
+        0x4C, 0x8B, 0x44, 0x24, 0x28, // 12..17: mov r8, [rsp + 0x28]
+        0x4C, 0x8B, 0x4C, 0x24, 0x30, // 17..22: mov r9, [rsp + 0x30]
+        0xB8, 0x00, 0x00, 0x00, 0x00, // 22..27: mov eax, imm32
+        0x0F, 0x05,                   // 27..29: syscall
+        0xC3,                         // 29..30: ret
     ];
     let id_bytes = syscall_id.to_le_bytes();
-    code[13..17].copy_from_slice(&id_bytes);
+    code[23..27].copy_from_slice(&id_bytes);
 
     buf[offset..offset + code.len()].copy_from_slice(&code);
 }
@@ -619,6 +702,233 @@ unsafe fn fill_find_data(dest: *mut Win32FindDataA, entry: &crate::fs::file::Dir
     data.c_file_name[copy_len] = 0;
 }
 
+pub fn sys_win32_get_environment_variable(
+    lp_name: *const u8,
+    lp_buffer: *mut u8,
+    n_size: u32,
+) -> u32 {
+    if lp_name.is_null() {
+        return 0;
+    }
+    let mut len = 0;
+    unsafe {
+        while *lp_name.add(len) != 0 && len < 256 {
+            len += 1;
+        }
+    }
+    let name_str = match core::str::from_utf8(unsafe { core::slice::from_raw_parts(lp_name, len) }) {
+        Ok(s) => s.to_ascii_uppercase(),
+        Err(_) => return 0,
+    };
+
+    let guard = get_win32_env_map();
+    let map = guard.as_ref().unwrap();
+
+    if let Some(val) = map.get(&name_str) {
+        let val_bytes = val.as_bytes();
+        let needed_with_null = val_bytes.len() + 1;
+
+        if lp_buffer.is_null() || (n_size as usize) < needed_with_null {
+            return needed_with_null as u32;
+        }
+
+        unsafe {
+            core::ptr::copy_nonoverlapping(val_bytes.as_ptr(), lp_buffer, val_bytes.len());
+            *lp_buffer.add(val_bytes.len()) = 0;
+        }
+
+        val_bytes.len() as u32
+    } else {
+        0
+    }
+}
+
+pub fn sys_win32_set_environment_variable(
+    lp_name: *const u8,
+    lp_value: *const u8,
+) -> u32 {
+    if lp_name.is_null() {
+        return 0; // FALSE
+    }
+    let mut len = 0;
+    unsafe {
+        while *lp_name.add(len) != 0 && len < 256 {
+            len += 1;
+        }
+    }
+    let name_str = match core::str::from_utf8(unsafe { core::slice::from_raw_parts(lp_name, len) }) {
+        Ok(s) => s.to_ascii_uppercase(),
+        Err(_) => return 0,
+    };
+
+    let mut guard = get_win32_env_map();
+    let map = guard.as_mut().unwrap();
+
+    if lp_value.is_null() {
+        map.remove(&name_str);
+    } else {
+        let mut val_len = 0;
+        unsafe {
+            while *lp_value.add(val_len) != 0 && val_len < 1024 {
+                val_len += 1;
+            }
+        }
+        let val_str = match core::str::from_utf8(unsafe { core::slice::from_raw_parts(lp_value, val_len) }) {
+            Ok(s) => String::from(s),
+            Err(_) => return 0,
+        };
+        map.insert(name_str, val_str);
+    }
+
+    1 // TRUE
+}
+
+pub fn sys_win32_reg_open_key_ex(
+    h_key: u64,
+    lp_subkey: *const u8,
+    _options: u32,
+    _sam: u32,
+    phk_result: *mut u64,
+) -> u32 {
+    if phk_result.is_null() {
+        return ERROR_INVALID_PARAMETER;
+    }
+
+    let base_path = match h_key {
+        HKEY_CLASSES_ROOT => String::from("HKCR"),
+        HKEY_CURRENT_USER => String::from("HKCU"),
+        HKEY_LOCAL_MACHINE => String::from("HKLM"),
+        HKEY_USERS => String::from("HKU"),
+        other => {
+            let open_keys = WIN32_OPEN_REG_KEYS.lock();
+            match open_keys.get(&other) {
+                Some(p) => p.clone(),
+                None => return ERROR_FILE_NOT_FOUND,
+            }
+        }
+    };
+
+    let subkey_str = if !lp_subkey.is_null() {
+        let mut len = 0;
+        unsafe {
+            while *lp_subkey.add(len) != 0 && len < 512 {
+                len += 1;
+            }
+        }
+        core::str::from_utf8(unsafe { core::slice::from_raw_parts(lp_subkey, len) }).unwrap_or("")
+    } else {
+        ""
+    };
+
+    let mut full_path = base_path;
+    let trimmed = subkey_str.trim_matches('\\');
+    if !trimmed.is_empty() {
+        full_path.push('\\');
+        full_path.push_str(trimmed);
+    }
+    let upper_path = full_path.to_ascii_uppercase();
+
+    // Verify key exists in registry or is a prefix of known keys
+    let guard = get_win32_registry();
+    let reg = guard.as_ref().unwrap();
+
+    let key_exists = reg.keys().any(|k| k == &upper_path || k.starts_with(&upper_path));
+    if !key_exists {
+        return ERROR_FILE_NOT_FOUND;
+    }
+
+    let handle = NEXT_REG_HANDLE.fetch_add(1, Ordering::SeqCst) as u64;
+    WIN32_OPEN_REG_KEYS.lock().insert(handle, upper_path);
+
+    unsafe {
+        *phk_result = handle;
+        *(phk_result as *mut u32) = handle as u32;
+    }
+
+    ERROR_SUCCESS
+}
+
+pub fn sys_win32_reg_query_value_ex(
+    h_key: u64,
+    lp_val_name: *const u8,
+    _reserved: *mut u32,
+    lp_type: *mut u32,
+    lp_data: *mut u8,
+    lpcb_data: *mut u32,
+) -> u32 {
+    let key_path = match h_key {
+        HKEY_CLASSES_ROOT => String::from("HKCR"),
+        HKEY_CURRENT_USER => String::from("HKCU"),
+        HKEY_LOCAL_MACHINE => String::from("HKLM"),
+        HKEY_USERS => String::from("HKU"),
+        other => {
+            let open_keys = WIN32_OPEN_REG_KEYS.lock();
+            match open_keys.get(&other) {
+                Some(p) => p.clone(),
+                None => return ERROR_FILE_NOT_FOUND,
+            }
+        }
+    };
+
+    let val_name = if !lp_val_name.is_null() {
+        let mut len = 0;
+        unsafe {
+            while *lp_val_name.add(len) != 0 && len < 256 {
+                len += 1;
+            }
+        }
+        match core::str::from_utf8(unsafe { core::slice::from_raw_parts(lp_val_name, len) }) {
+            Ok(s) => s.to_ascii_uppercase(),
+            Err(_) => return ERROR_FILE_NOT_FOUND,
+        }
+    } else {
+        String::new()
+    };
+
+    let guard = get_win32_registry();
+    let reg = guard.as_ref().unwrap();
+
+    let values_map = match reg.get(&key_path) {
+        Some(m) => m,
+        None => return ERROR_FILE_NOT_FOUND,
+    };
+
+    let (vtype, vdata) = match values_map.get(&val_name) {
+        Some(pair) => pair,
+        None => return ERROR_FILE_NOT_FOUND,
+    };
+
+    if !lp_type.is_null() {
+        unsafe {
+            *lp_type = *vtype;
+        }
+    }
+
+    if !lpcb_data.is_null() {
+        let buf_size = unsafe { *lpcb_data } as usize;
+        unsafe {
+            *lpcb_data = vdata.len() as u32;
+        }
+
+        if !lp_data.is_null() {
+            if buf_size < vdata.len() {
+                return ERROR_MORE_DATA;
+            }
+            unsafe {
+                core::ptr::copy_nonoverlapping(vdata.as_ptr(), lp_data, vdata.len());
+            }
+        }
+    }
+
+    ERROR_SUCCESS
+}
+
+pub fn sys_win32_reg_close_key(h_key: u64) -> u32 {
+    let mut open_keys = WIN32_OPEN_REG_KEYS.lock();
+    open_keys.remove(&h_key);
+    ERROR_SUCCESS
+}
+
 // -----------------------------------------------------------------------------
 // Win32 Symbol Resolver (maps imports to user-mode VDSO thunk entry points)
 // -----------------------------------------------------------------------------
@@ -632,9 +942,13 @@ pub fn resolve_win32_symbol(dll: &str, symbol: &str) -> Option<usize> {
         || dll.eq_ignore_ascii_case("api-ms-win-core-file-l1-1-0.dll")
         || dll.eq_ignore_ascii_case("api-ms-win-core-handle-l1-1-0.dll");
 
+    let is_advapi32 = dll.eq_ignore_ascii_case("advapi32.dll")
+        || dll.eq_ignore_ascii_case("advapi32")
+        || dll.eq_ignore_ascii_case("api-ms-win-core-registry-l1-1-0.dll");
+
     let is_ntdll = dll.eq_ignore_ascii_case("ntdll.dll") || dll.eq_ignore_ascii_case("ntdll");
 
-    if is_kernel32 || is_ntdll {
+    if is_kernel32 || is_advapi32 || is_ntdll {
         match symbol {
             "GetStdHandle" => Some((WIN32_VDSO_BASE as usize) + THUNK_GET_STD_HANDLE),
             "WriteConsoleA" => Some((WIN32_VDSO_BASE as usize) + THUNK_WRITE_CONSOLE_A),
@@ -663,6 +977,11 @@ pub fn resolve_win32_symbol(dll: &str, symbol: &str) -> Option<usize> {
             "FindFirstFileA" | "FindFirstFileExA" => Some((WIN32_VDSO_BASE as usize) + THUNK_FIND_FIRST_FILE_A),
             "FindNextFileA" => Some((WIN32_VDSO_BASE as usize) + THUNK_FIND_NEXT_FILE_A),
             "FindClose" => Some((WIN32_VDSO_BASE as usize) + THUNK_FIND_CLOSE),
+            "GetEnvironmentVariableA" => Some((WIN32_VDSO_BASE as usize) + THUNK_GET_ENVIRONMENT_VARIABLE_A),
+            "SetEnvironmentVariableA" => Some((WIN32_VDSO_BASE as usize) + THUNK_SET_ENVIRONMENT_VARIABLE_A),
+            "RegOpenKeyExA" => Some((WIN32_VDSO_BASE as usize) + THUNK_REG_OPEN_KEY_EX_A),
+            "RegQueryValueExA" => Some((WIN32_VDSO_BASE as usize) + THUNK_REG_QUERY_VALUE_EX_A),
+            "RegCloseKey" => Some((WIN32_VDSO_BASE as usize) + THUNK_REG_CLOSE_KEY),
             "RtlAllocateHeap" => Some((WIN32_VDSO_BASE as usize) + THUNK_HEAP_ALLOC),
             "RtlFreeHeap" => Some((WIN32_VDSO_BASE as usize) + THUNK_HEAP_FREE),
             "RtlExitUserProcess" => Some((WIN32_VDSO_BASE as usize) + THUNK_EXIT_PROCESS),
@@ -866,6 +1185,11 @@ pub fn load_win32_exe(data: &[u8]) -> Result<Win32Process, &'static str> {
         emit_win32_thunk(&mut vdso_buf, THUNK_FIND_FIRST_FILE_A, 0x1018);
         emit_win32_thunk(&mut vdso_buf, THUNK_FIND_NEXT_FILE_A, 0x1019);
         emit_win32_thunk(&mut vdso_buf, THUNK_FIND_CLOSE, 0x101A);
+        emit_win32_thunk(&mut vdso_buf, THUNK_GET_ENVIRONMENT_VARIABLE_A, 0x101B);
+        emit_win32_thunk(&mut vdso_buf, THUNK_SET_ENVIRONMENT_VARIABLE_A, 0x101C);
+        emit_win32_thunk(&mut vdso_buf, THUNK_REG_OPEN_KEY_EX_A, 0x101D);
+        emit_win32_thunk(&mut vdso_buf, THUNK_REG_QUERY_VALUE_EX_A, 0x101E);
+        emit_win32_thunk(&mut vdso_buf, THUNK_REG_CLOSE_KEY, 0x101F);
 
         unsafe {
             core::ptr::copy_nonoverlapping(

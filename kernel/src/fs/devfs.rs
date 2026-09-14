@@ -18,25 +18,14 @@ use core::sync::atomic::{AtomicU64, Ordering};
 static PRNG_STATE: AtomicU64 = AtomicU64::new(0x853C49E6748FEA9B);
 
 fn next_random_u64() -> u64 {
-    // Try hardware RDRAND instruction if available
-    #[cfg(target_arch = "x86_64")]
-    unsafe {
-        let mut val: u64 = 0;
-        let mut success: u8;
-        core::arch::asm!(
-            "rdrand {0}",
-            "setc {1}",
-            out(reg) val,
-            out(reg_byte) success,
-            options(nostack, nomem)
-        );
-        if success != 0 && val != 0 && val != u64::MAX {
-            return val;
-        }
-    }
-
-    // Xorshift64 fallback
     let mut state = PRNG_STATE.load(Ordering::Relaxed);
+    let tsc: u64 = unsafe {
+        let low: u32;
+        let high: u32;
+        core::arch::asm!("rdtsc", out("eax") low, out("edx") high, options(nostack, nomem));
+        ((high as u64) << 32) | (low as u64)
+    };
+    state = state.wrapping_add(tsc).wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
     state ^= state << 13;
     state ^= state >> 7;
     state ^= state << 17;

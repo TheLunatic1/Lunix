@@ -285,5 +285,28 @@ The kernel boots into an interactive graphical console with an IBM VGA font disp
 - **Terminal Control**: `sys_ioctl` (16) handles `TIOCGWINSZ`, `TCGETS`, `TCSETS`, and `FIONBIO`.
 - **Win32 Stream & Search Subsystem**: Implements `CreatePipe` (0x1014), `SetStdHandle` (0x1015), `CreateFileA` (0x1016), `CloseHandle` (0x1017), `FindFirstFileA` (0x1018), `FindNextFileA` (0x1019), and `FindClose` (0x101A) VDSO thunks and kernel shims.
 
+### Phase 15: Milestone 3 — Virtual Pseudo-Filesystems (`/dev` & `/proc`) and Windows Environment & In-Memory Registry
+- **Linux Character & Block Devices (`devfs`)**:
+  - `/dev/null`: Discards all writes; reads return EOF (0 bytes).
+  - `/dev/zero`: Fills read buffers with `0x00`; discards all writes.
+  - `/dev/urandom` & `/dev/random`: High-entropy pseudo-random byte generator powered by CPU `rdtsc` and 64-bit Xorshift PRNG.
+  - `/dev/tty` & `/dev/console`: Routes read/write calls directly to active graphical framebuffer console and serial COM1 UART.
+  - `/dev/sda`: Standard block storage device handle.
+- **Linux Dynamic System Info Nodes (`procfs`)**:
+  - `/proc/version`: Linux 6.8.0 kernel string with Rust compiler version and SMP build timestamp.
+  - `/proc/meminfo`: Live physical memory accounting (`MemTotal`, `MemFree`, `MemAvailable`, `Cached`) parsed dynamically from PMM and Heap stats.
+  - `/proc/cpuinfo`: Multi-core processor topology (`processor`, `vendor_id`, `model name`, `flags`, `cpu cores`) generated from APIC/SMP core records.
+  - `/proc/mounts`: Dynamic mount table containing active root and pseudo-filesystem mount entries.
+  - `/proc/uptime`: Real-time system uptime metrics generated from 1000 Hz Local APIC timer ticks.
+- **Unified VFS File Descriptor Streaming**:
+  - Added `FdTarget::VfsHandle(Arc<Mutex<Box<dyn FileHandle>>>)` to `Process::fds`.
+  - Seamless stream routing for `sys_open`, `sys_openat`, `sys_read`, `sys_write`, `sys_lseek`, and `sys_close` across all physical and virtual filesystem handles.
+- **Windows Win32 Environment & In-Memory Registry Subsystem**:
+  - `WIN32_ENV`: Thread-safe global store pre-populated with `OS`, `PROCESSOR_ARCHITECTURE`, `NUMBER_OF_PROCESSORS`, `PATH`, `SYSTEMROOT`, `TEMP`, `USERPROFILE`.
+  - `WIN32_REGISTRY`: Hierarchical registry key/value database pre-populated with `HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion` and `HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment`.
+  - Win32 DDI Shims: `GetEnvironmentVariableA` (0x101B), `SetEnvironmentVariableA` (0x101C), `RegOpenKeyExA` (0x101D), `RegQueryValueExA` (0x101E), `RegCloseKey` (0x101F).
+  - Extended Win64 ABI thunk generator in `emit_win32_thunk` to unpack 5th and 6th parameters from `[RSP + 0x28]` and `[RSP + 0x30]`.
+
+
 
 

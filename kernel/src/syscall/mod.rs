@@ -78,6 +78,11 @@ pub const WIN32_SYS_CLOSEHANDLE: usize = 0x1017;
 pub const WIN32_SYS_FINDFIRSTFILE: usize = 0x1018;
 pub const WIN32_SYS_FINDNEXTFILE: usize = 0x1019;
 pub const WIN32_SYS_FINDCLOSE: usize = 0x101A;
+pub const WIN32_SYS_GETENVIRONMENTVARIABLE: usize = 0x101B;
+pub const WIN32_SYS_SETENVIRONMENTVARIABLE: usize = 0x101C;
+pub const WIN32_SYS_REGOPENKEYEX: usize = 0x101D;
+pub const WIN32_SYS_REGQUERYVALUEEX: usize = 0x101E;
+pub const WIN32_SYS_REGCLOSEKEY: usize = 0x101F;
 
 static USER_BRK: Mutex<u64> = Mutex::new(0x0000_6000_0000_0000);
 
@@ -128,7 +133,7 @@ pub extern "C" fn syscall_dispatcher(
     arg3: u64,
     arg4: u64,
     arg5: u64,
-    _arg6: u64,
+    arg6: u64,
 ) -> u64 {
     crate::lunix_serial_println!("  [SYSCALL_DISPATCH] num=0x{:X}, a1=0x{:X}, a2=0x{:X}, a3=0x{:X}", num, arg1, arg2, arg3);
     let ret = match num {
@@ -140,7 +145,7 @@ pub extern "C" fn syscall_dispatcher(
         LINUX_SYS_STAT => sys_stat(arg1 as *const u8, arg2 as usize) as u64,
         LINUX_SYS_FSTAT => 0, // Success
         LINUX_SYS_POLL => 1, // Ready
-        LINUX_SYS_LSEEK => 0, // Success (offset 0)
+        LINUX_SYS_LSEEK => sys_lseek(arg1 as usize, arg2 as i64, arg3 as i32) as u64,
         LINUX_SYS_MMAP => sys_mmap(arg1, arg2, arg3 as u32, arg4 as u32) as u64,
         LINUX_SYS_MUNMAP => sys_munmap(arg1, arg2) as u64,
         LINUX_SYS_BRK => sys_brk(arg1),
@@ -292,6 +297,41 @@ pub extern "C" fn syscall_dispatcher(
         WIN32_SYS_FINDCLOSE => {
             crate::subsystems::nt::win32::sys_win32_find_close(arg1) as u64
         }
+        WIN32_SYS_GETENVIRONMENTVARIABLE => {
+            crate::subsystems::nt::win32::sys_win32_get_environment_variable(
+                arg1 as *const u8,
+                arg2 as *mut u8,
+                arg3 as u32,
+            ) as u64
+        }
+        WIN32_SYS_SETENVIRONMENTVARIABLE => {
+            crate::subsystems::nt::win32::sys_win32_set_environment_variable(
+                arg1 as *const u8,
+                arg2 as *const u8,
+            ) as u64
+        }
+        WIN32_SYS_REGOPENKEYEX => {
+            crate::subsystems::nt::win32::sys_win32_reg_open_key_ex(
+                arg1,
+                arg2 as *const u8,
+                arg3 as u32,
+                arg4 as u32,
+                arg5 as *mut u64,
+            ) as u64
+        }
+        WIN32_SYS_REGQUERYVALUEEX => {
+            crate::subsystems::nt::win32::sys_win32_reg_query_value_ex(
+                arg1,
+                arg2 as *const u8,
+                arg3 as *mut u32,
+                arg4 as *mut u32,
+                arg5 as *mut u8,
+                arg6 as *mut u32,
+            ) as u64
+        }
+        WIN32_SYS_REGCLOSEKEY => {
+            crate::subsystems::nt::win32::sys_win32_reg_close_key(arg1) as u64
+        }
 
         _ => {
             lunix_println!("[SYSCALL] Unimplemented syscall number: {}", num);
@@ -392,6 +432,14 @@ pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> isize {
                 }
                 return -9;
             }
+            FdTarget::VfsHandle(ref handle) => {
+                let slice = unsafe { slice::from_raw_parts(buf, len) };
+                let mut h = handle.lock();
+                match h.write(slice) {
+                    Ok(n) => return n as isize,
+                    Err(_) => return -1,
+                }
+            }
             FdTarget::Socket(sid) => {
                 return sys_sendto(sid, buf, len, 0, core::ptr::null());
             }
@@ -481,6 +529,14 @@ pub fn sys_read(fd: usize, buf: *mut u8, len: usize) -> isize {
                 }
                 return -9;
             }
+            FdTarget::VfsHandle(ref handle) => {
+                let slice = unsafe { slice::from_raw_parts_mut(buf, len) };
+                let mut h = handle.lock();
+                match h.read(slice) {
+                    Ok(n) => return n as isize,
+                    Err(_) => return -1,
+                }
+            }
             FdTarget::Socket(sid) => {
                 return sys_recvfrom(sid, buf, len);
             }
@@ -500,6 +556,51 @@ pub fn sys_read(fd: usize, buf: *mut u8, len: usize) -> isize {
     -9 // EBADF
 }
 
+pub fn sys_lseek(fd: usize, offset: i64, whence: i32) -> isize {
+    crate::lunix_serial_println!("  [SYS_LSEEK] fd={}, offset={}, whence={}", fd, offset, whence);
+    let seek_from = match whence {
+        0 => {
+            if offset < 0 {
+                return -22; // -EINVAL
+            }
+            crate::fs::file::SeekFrom::Start(offset as u64)
+        }
+        1 => crate::fs::file::SeekFrom::Current(offset),
+        2 => crate::fs::file::SeekFrom::End(offset),
+        _ => return -22, // -EINVAL
+    };
+
+    if let Some(proc_arc) = crate::task::scheduler::get_current_process() {
+        let proc = proc_arc.lock();
+        if let Some(desc_arc) = proc.get_fd(fd) {
+            let mut desc = desc_arc.lock();
+            match desc.target {
+                FdTarget::File { offset: ref mut f_off, size, .. } => {
+                    let new_off: i64 = match seek_from {
+                        crate::fs::file::SeekFrom::Start(s) => s as i64,
+                        crate::fs::file::SeekFrom::Current(c) => *f_off as i64 + c,
+                        crate::fs::file::SeekFrom::End(e) => size as i64 + e,
+                    };
+                    if new_off < 0 {
+                        return -22; // -EINVAL
+                    }
+                    *f_off = new_off as usize;
+                    return new_off as isize;
+                }
+                FdTarget::VfsHandle(ref handle) => {
+                    let mut h = handle.lock();
+                    match h.seek(seek_from) {
+                        Ok(pos) => return pos as isize,
+                        Err(_) => return -22, // -EINVAL
+                    }
+                }
+                _ => return -29, // -ESPIPE
+            }
+        }
+    }
+    -9 // -EBADF
+}
+
 pub fn sys_open(path_ptr: *const u8, path_len: usize, flags: u32) -> isize {
     if path_ptr.is_null() || path_len == 0 {
         return -1;
@@ -517,6 +618,13 @@ pub fn sys_open(path_ptr: *const u8, path_len: usize, flags: u32) -> isize {
                         entries,
                         current_idx: 0,
                     },
+                    flags,
+                }) {
+                    return fd as isize;
+                }
+            } else if let Ok(handle) = crate::fs::vfs::open(path) {
+                if let Some(fd) = proc.allocate_fd(crate::task::process::FileDescriptor {
+                    target: FdTarget::VfsHandle(alloc::sync::Arc::new(Mutex::new(handle))),
                     flags,
                 }) {
                     return fd as isize;
@@ -1080,6 +1188,13 @@ pub fn sys_openat(dfd: i32, filename_ptr: *const u8, flags: u32) -> isize {
                     entries,
                     current_idx: 0,
                 },
+                flags,
+            }) {
+                return fd as isize;
+            }
+        } else if let Ok(handle) = crate::fs::vfs::open(&resolved_path) {
+            if let Some(fd) = proc.allocate_fd(crate::task::process::FileDescriptor {
+                target: FdTarget::VfsHandle(alloc::sync::Arc::new(Mutex::new(handle))),
                 flags,
             }) {
                 return fd as isize;
