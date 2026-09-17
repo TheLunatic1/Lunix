@@ -3,6 +3,11 @@ use crate::{lunix_print, lunix_println};
 use core::slice;
 use spin::Mutex;
 
+pub mod unix_socket;
+
+pub static IN_MEMORY_FILES: spin::Mutex<alloc::collections::BTreeMap<alloc::string::String, alloc::sync::Arc<spin::Mutex<alloc::vec::Vec<u8>>>>> =
+    spin::Mutex::new(alloc::collections::BTreeMap::new());
+
 // Linux x86_64 standard syscall numbers
 pub const LINUX_SYS_READ: usize = 0;
 pub const LINUX_SYS_WRITE: usize = 1;
@@ -40,6 +45,11 @@ pub const LINUX_SYS_SENDTO: usize = 44;
 pub const LINUX_SYS_RECVFROM: usize = 45;
 pub const LINUX_SYS_BIND: usize = 49;
 pub const LINUX_SYS_LISTEN: usize = 50;
+pub const LINUX_SYS_GETSOCKNAME: usize = 51;
+pub const LINUX_SYS_GETPEERNAME: usize = 52;
+pub const LINUX_SYS_SOCKETPAIR: usize = 53;
+pub const LINUX_SYS_SETSOCKOPT: usize = 54;
+pub const LINUX_SYS_GETSOCKOPT: usize = 55;
 pub const LINUX_SYS_CLONE: usize = 56;
 pub const LINUX_SYS_FORK: usize = 57;
 pub const LINUX_SYS_VFORK: usize = 58;
@@ -88,6 +98,7 @@ pub const LINUX_SYS_FUTEX: usize = 202;
 pub const LINUX_SYS_GETDENTS64: usize = 217;
 pub const LINUX_SYS_SET_TID_ADDRESS: usize = 218;
 pub const LINUX_SYS_CLOCK_GETTIME: usize = 228;
+pub const LINUX_SYS_CLOCK_NANOSLEEP: usize = 230;
 pub const LINUX_SYS_EXIT_GROUP: usize = 231;
 pub const LINUX_SYS_TGKILL: usize = 234;
 pub const LINUX_SYS_OPENAT: usize = 257;
@@ -98,6 +109,7 @@ pub const LINUX_SYS_READLINKAT: usize = 267;
 pub const LINUX_SYS_FACCESSAT: usize = 269;
 pub const LINUX_SYS_SET_ROBUST_LIST: usize = 273;
 pub const LINUX_SYS_GET_ROBUST_LIST: usize = 274;
+pub const LINUX_SYS_ACCEPT4: usize = 288;
 pub const LINUX_SYS_DUP3: usize = 292;
 pub const LINUX_SYS_PIPE2: usize = 293;
 pub const LINUX_SYS_PRLIMIT64: usize = 302;
@@ -262,7 +274,7 @@ pub extern "C" fn syscall_dispatcher(
         LINUX_SYS_CLOSE => sys_close(arg1 as usize) as u64,
         LINUX_SYS_STAT => sys_stat(arg1 as *const u8, arg2 as *mut LinuxStat) as u64,
         LINUX_SYS_FSTAT => sys_fstat(arg1 as usize, arg2 as *mut LinuxStat) as u64,
-        LINUX_SYS_POLL => 1, // Ready
+        LINUX_SYS_POLL => sys_poll(arg1 as *mut LinuxPollFd, arg2 as usize, arg3 as i32) as u64,
         LINUX_SYS_LSEEK => sys_lseek(arg1 as usize, arg2 as i64, arg3 as i32) as u64,
         LINUX_SYS_MMAP => sys_mmap(arg1, arg2, arg3 as u32, arg4 as u32, arg5 as i32, arg6) as u64,
         LINUX_SYS_MPROTECT => 0, // Memory protection OK
@@ -287,11 +299,15 @@ pub extern "C" fn syscall_dispatcher(
         LINUX_SYS_GETPID => sys_getpid() as u64,
         LINUX_SYS_SOCKET => sys_socket(arg1 as i32, arg2 as i32, arg3 as i32) as u64,
         LINUX_SYS_CONNECT => sys_connect(arg1 as usize, arg2 as *const u8, arg3 as usize) as u64,
-        LINUX_SYS_ACCEPT => 0,
+        LINUX_SYS_ACCEPT | LINUX_SYS_ACCEPT4 => sys_accept(arg1 as usize, arg2 as *mut u8, arg3 as *mut u32) as u64,
         LINUX_SYS_SENDTO => sys_sendto(arg1 as usize, arg2 as *const u8, arg3 as usize, arg4 as u32, arg5 as *const u8) as u64,
         LINUX_SYS_RECVFROM => sys_recvfrom(arg1 as usize, arg2 as *mut u8, arg3 as usize) as u64,
         LINUX_SYS_BIND => sys_bind(arg1 as usize, arg2 as *const u8, arg3 as usize) as u64,
-        LINUX_SYS_LISTEN => 0,
+        LINUX_SYS_LISTEN => sys_listen(arg1 as usize, arg2 as usize) as u64,
+        LINUX_SYS_GETSOCKNAME | LINUX_SYS_GETPEERNAME => sys_getsockname(arg1 as usize, arg2 as *mut u8, arg3 as *mut u32) as u64,
+        LINUX_SYS_SOCKETPAIR => sys_socketpair(arg1 as i32, arg2 as i32, arg3 as i32, arg4 as *mut [i32; 2]) as u64,
+        LINUX_SYS_SETSOCKOPT => sys_setsockopt(arg1 as usize, arg2 as i32, arg3 as i32, arg4 as *const u8, arg5 as u32) as u64,
+        LINUX_SYS_GETSOCKOPT => sys_getsockopt(arg1 as usize, arg2 as i32, arg3 as i32, arg4 as *mut u8, arg5 as *mut u32) as u64,
         LINUX_SYS_CLONE => sys_clone(arg1, arg2) as u64,
         LINUX_SYS_FORK => sys_clone(0, 0) as u64,
         LINUX_SYS_VFORK => sys_vfork() as u64,
@@ -330,6 +346,7 @@ pub extern "C" fn syscall_dispatcher(
         LINUX_SYS_GETDENTS64 => sys_getdents64(arg1 as usize, arg2 as *mut u8, arg3 as usize) as u64,
         LINUX_SYS_SET_TID_ADDRESS => sys_set_tid_address(arg1 as *mut i32) as u64,
         LINUX_SYS_CLOCK_GETTIME => sys_clock_gettime(arg1 as i32, arg2 as *mut LinuxTimeSpec) as u64,
+        LINUX_SYS_CLOCK_NANOSLEEP => sys_clock_nanosleep(arg1 as i32, arg2 as i32, arg3 as *const LinuxTimeSpec, arg4 as *mut LinuxTimeSpec) as u64,
         LINUX_SYS_EXIT_GROUP => sys_exit(arg1 as i32),
         LINUX_SYS_TGKILL => 0,
         LINUX_SYS_OPENAT => sys_openat(arg1 as i32, arg2 as *const u8, arg3 as u32) as u64,
@@ -583,7 +600,8 @@ pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> isize {
                     let proc = proc_arc.lock();
                     if let Some(desc_arc) = proc.get_fd(fd) {
                         let mut desc = desc_arc.lock();
-                        if let FdTarget::File { ref mut offset, ref mut size, ref mut data, .. } = desc.target {
+                        if let FdTarget::File { ref mut offset, ref buffer, .. } = desc.target {
+                            let mut data = buffer.lock();
                             let slice = unsafe { slice::from_raw_parts(buf, len) };
                             let needed = *offset + len;
                             if needed > data.len() {
@@ -591,9 +609,6 @@ pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> isize {
                             }
                             data[*offset..*offset + len].copy_from_slice(slice);
                             *offset += len;
-                            if *offset > *size {
-                                *size = *offset;
-                            }
                             return len as isize;
                         }
                     }
@@ -610,6 +625,12 @@ pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> isize {
             }
             FdTarget::Socket(sid) => {
                 return sys_sendto(sid, buf, len, 0, core::ptr::null());
+            }
+            FdTarget::UnixSocket(ref sock) => {
+                let non_blocking = (flags & 0x800) != 0;
+                let slice = unsafe { slice::from_raw_parts(buf, len) };
+                let sock_guard = sock.lock();
+                return sock_guard.write(slice, non_blocking);
             }
             _ => return -9, // EBADF
         }
@@ -682,7 +703,9 @@ pub fn sys_read(fd: usize, buf: *mut u8, len: usize) -> isize {
                     let proc = proc_arc.lock();
                     if let Some(desc_arc) = proc.get_fd(fd) {
                         let mut desc = desc_arc.lock();
-                        if let FdTarget::File { ref mut offset, size, ref data, .. } = desc.target {
+                        if let FdTarget::File { ref mut offset, ref buffer, .. } = desc.target {
+                            let data = buffer.lock();
+                            let size = data.len();
                             if *offset >= size {
                                 return 0; // EOF
                             }
@@ -707,6 +730,12 @@ pub fn sys_read(fd: usize, buf: *mut u8, len: usize) -> isize {
             }
             FdTarget::Socket(sid) => {
                 return sys_recvfrom(sid, buf, len);
+            }
+            FdTarget::UnixSocket(ref sock) => {
+                let non_blocking = (flags & 0x800) != 0;
+                let slice = unsafe { slice::from_raw_parts_mut(buf, len) };
+                let sock_guard = sock.lock();
+                return sock_guard.read(slice, non_blocking);
             }
             FdTarget::Directory { .. } => {
                 return -21; // -EISDIR
@@ -743,11 +772,12 @@ pub fn sys_lseek(fd: usize, offset: i64, whence: i32) -> isize {
         if let Some(desc_arc) = proc.get_fd(fd) {
             let mut desc = desc_arc.lock();
             match desc.target {
-                FdTarget::File { offset: ref mut f_off, size, .. } => {
+                FdTarget::File { offset: ref mut f_off, ref buffer, .. } => {
+                    let size = buffer.lock().len() as i64;
                     let new_off: i64 = match seek_from {
                         crate::fs::file::SeekFrom::Start(s) => s as i64,
                         crate::fs::file::SeekFrom::Current(c) => *f_off as i64 + c,
-                        crate::fs::file::SeekFrom::End(e) => size as i64 + e,
+                        crate::fs::file::SeekFrom::End(e) => size + e,
                     };
                     if new_off < 0 {
                         return -22; // -EINVAL
@@ -779,7 +809,8 @@ pub fn sys_pread64(fd: usize, buf: *mut u8, count: usize, pos: u64) -> isize {
         if let Some(desc_arc) = proc.get_fd(fd) {
             let desc = desc_arc.lock();
             match desc.target {
-                FdTarget::File { ref data, .. } => {
+                FdTarget::File { ref buffer, .. } => {
+                    let data = buffer.lock();
                     let off = pos as usize;
                     if off >= data.len() {
                         return 0;
@@ -956,7 +987,8 @@ pub fn sys_mmap(addr: u64, length: u64, _prot: u32, _flags: u32, fd: i32, offset
                             }
                         }
                     }
-                    FdTarget::File { ref data, .. } => {
+                    FdTarget::File { ref buffer, .. } => {
+                        let data = buffer.lock();
                         let off = offset as usize;
                         if off < data.len() {
                             let copy_len = (data.len() - off).min(length as usize);
@@ -1318,6 +1350,16 @@ pub fn sys_nanosleep(req: *const LinuxTimeSpec) -> isize {
     0
 }
 
+pub fn sys_clock_nanosleep(_clockid: i32, _flags: i32, req: *const LinuxTimeSpec, _rem: *mut LinuxTimeSpec) -> isize {
+    if req.is_null() {
+        return -14; // -EFAULT
+    }
+    let spec = unsafe { &*req };
+    let ms = (spec.tv_sec as u64 * 1000) + (spec.tv_nsec as u64 / 1_000_000);
+    crate::task::scheduler::sleep_ms(ms.max(1));
+    0
+}
+
 pub fn sys_getpid() -> isize {
     let pid = crate::task::scheduler::current_pid();
     if pid > 0 { pid as isize } else { 1 }
@@ -1456,16 +1498,33 @@ pub fn sys_chdir(path_ptr: *const u8) -> isize {
     0
 }
 
-pub fn sys_socket(_domain: i32, _sock_type: i32, _protocol: i32) -> isize {
+pub fn sys_socket(domain: i32, sock_type: i32, protocol: i32) -> isize {
+    crate::lunix_serial_println!("  [SYS_SOCKET] domain={}, type={}, proto={}", domain, sock_type, protocol);
+    let base_type = sock_type & 0xFF;
+    if domain == unix_socket::AF_UNIX || domain == unix_socket::AF_LOCAL {
+        let sock_arc = unix_socket::UnixSocket::new(domain, base_type, protocol);
+        if let Some(proc_arc) = crate::task::scheduler::get_current_process() {
+            let mut proc = proc_arc.lock();
+            if let Some(fd) = proc.allocate_fd(crate::task::process::FileDescriptor {
+                target: FdTarget::UnixSocket(sock_arc),
+                flags: if (sock_type & 0x800) != 0 { 0x800 } else { 0 },
+            }) {
+                return fd as isize;
+            } else {
+                return -24; // -EMFILE
+            }
+        }
+    }
+
     let mut lock = crate::net::NET_STACK.lock();
     if let Some(ref mut stack) = *lock {
         let sid = stack.next_socket_id;
         stack.next_socket_id += 1;
         let sock = crate::net::Socket {
             id: sid,
-            domain: _domain,
-            socket_type: _sock_type,
-            protocol: _protocol,
+            domain,
+            socket_type: sock_type,
+            protocol,
             local_ip: crate::net::DEFAULT_IP,
             local_port: 0,
             remote_ip: [0, 0, 0, 0],
@@ -1474,13 +1533,40 @@ pub fn sys_socket(_domain: i32, _sock_type: i32, _protocol: i32) -> isize {
             recv_queue: alloc::vec::Vec::new(),
         };
         stack.sockets.insert(sid, sock);
+        if let Some(proc_arc) = crate::task::scheduler::get_current_process() {
+            let mut proc = proc_arc.lock();
+            if let Some(fd) = proc.allocate_fd(crate::task::process::FileDescriptor {
+                target: FdTarget::Socket(sid),
+                flags: 0,
+            }) {
+                return fd as isize;
+            } else {
+                return -24;
+            }
+        }
         sid as isize
     } else {
         -1
     }
 }
 
-pub fn sys_bind(sockfd: usize, _addr: *const u8, _addrlen: usize) -> isize {
+pub fn sys_bind(sockfd: usize, addr: *const u8, addrlen: usize) -> isize {
+    crate::lunix_serial_println!("  [SYS_BIND] fd={}, addr={:p}, len={}", sockfd, addr, addrlen);
+    if let Some(proc_arc) = crate::task::scheduler::get_current_process() {
+        let proc = proc_arc.lock();
+        if let Some(desc_arc) = proc.get_fd(sockfd) {
+            let desc = desc_arc.lock();
+            if let FdTarget::UnixSocket(ref sock_arc) = desc.target {
+                if !addr.is_null() && addrlen >= 2 {
+                    let sockaddr = unsafe { &*(addr as *const unix_socket::SockAddrUn) };
+                    let path = sockaddr.get_path();
+                    return unix_socket::UnixSocket::bind(sock_arc, &path);
+                }
+                return -22; // -EINVAL
+            }
+        }
+    }
+
     let mut lock = crate::net::NET_STACK.lock();
     if let Some(ref mut stack) = *lock {
         if stack.sockets.contains_key(&sockfd) {
@@ -1493,7 +1579,37 @@ pub fn sys_bind(sockfd: usize, _addr: *const u8, _addrlen: usize) -> isize {
     }
 }
 
-pub fn sys_connect(sockfd: usize, _addr: *const u8, _addrlen: usize) -> isize {
+pub fn sys_listen(sockfd: usize, backlog: usize) -> isize {
+    crate::lunix_serial_println!("  [SYS_LISTEN] fd={}, backlog={}", sockfd, backlog);
+    if let Some(proc_arc) = crate::task::scheduler::get_current_process() {
+        let proc = proc_arc.lock();
+        if let Some(desc_arc) = proc.get_fd(sockfd) {
+            let desc = desc_arc.lock();
+            if let FdTarget::UnixSocket(ref sock_arc) = desc.target {
+                return sock_arc.lock().listen(backlog);
+            }
+        }
+    }
+    0
+}
+
+pub fn sys_connect(sockfd: usize, addr: *const u8, addrlen: usize) -> isize {
+    crate::lunix_serial_println!("  [SYS_CONNECT] fd={}, addr={:p}, len={}", sockfd, addr, addrlen);
+    if let Some(proc_arc) = crate::task::scheduler::get_current_process() {
+        let proc = proc_arc.lock();
+        if let Some(desc_arc) = proc.get_fd(sockfd) {
+            let desc = desc_arc.lock();
+            if let FdTarget::UnixSocket(ref sock_arc) = desc.target {
+                if !addr.is_null() && addrlen >= 2 {
+                    let sockaddr = unsafe { &*(addr as *const unix_socket::SockAddrUn) };
+                    let path = sockaddr.get_path();
+                    return unix_socket::UnixSocket::connect(sock_arc, &path);
+                }
+                return -22; // -EINVAL
+            }
+        }
+    }
+
     let mut lock = crate::net::NET_STACK.lock();
     if let Some(ref mut stack) = *lock {
         if let Some(sock) = stack.sockets.get_mut(&sockfd) {
@@ -1505,6 +1621,246 @@ pub fn sys_connect(sockfd: usize, _addr: *const u8, _addrlen: usize) -> isize {
     } else {
         -1
     }
+}
+
+pub fn sys_accept(sockfd: usize, addr: *mut u8, addrlen: *mut u32) -> isize {
+    crate::lunix_serial_println!("  [SYS_ACCEPT] fd={}", sockfd);
+    if let Some(proc_arc) = crate::task::scheduler::get_current_process() {
+        let (sock_opt, flags) = {
+            let proc = proc_arc.lock();
+            if let Some(desc_arc) = proc.get_fd(sockfd) {
+                let desc = desc_arc.lock();
+                if let FdTarget::UnixSocket(ref s) = desc.target {
+                    (Some(s.clone()), desc.flags)
+                } else {
+                    (None, 0)
+                }
+            } else {
+                (None, 0)
+            }
+        };
+
+        if let Some(sock_arc) = sock_opt {
+            let non_blocking = (flags & 0x800) != 0;
+            for _ in 0..50 {
+                match unix_socket::UnixSocket::accept(&sock_arc) {
+                    Ok(client_sock) => {
+                        let mut proc = proc_arc.lock();
+                        if let Some(new_fd) = proc.allocate_fd(crate::task::process::FileDescriptor {
+                            target: FdTarget::UnixSocket(client_sock),
+                            flags: 0,
+                        }) {
+                            if !addr.is_null() && !addrlen.is_null() {
+                                unsafe {
+                                    *addrlen = core::mem::size_of::<unix_socket::SockAddrUn>() as u32;
+                                    let sun = addr as *mut unix_socket::SockAddrUn;
+                                    (*sun).sun_family = unix_socket::AF_UNIX as u16;
+                                    (*sun).sun_path = [0; 108];
+                                }
+                            }
+                            return new_fd as isize;
+                        } else {
+                            return -24; // -EMFILE
+                        }
+                    }
+                    Err(-11) => {
+                        if non_blocking {
+                            return -11; // -EAGAIN
+                        }
+                        crate::task::scheduler::sleep_ms(2);
+                    }
+                    Err(e) => return e,
+                }
+            }
+            return if non_blocking { -11 } else { -11 };
+        }
+    }
+    -22 // -EINVAL
+}
+
+pub fn sys_getsockname(sockfd: usize, addr: *mut u8, addrlen: *mut u32) -> isize {
+    if addr.is_null() || addrlen.is_null() {
+        return -14; // -EFAULT
+    }
+    if let Some(proc_arc) = crate::task::scheduler::get_current_process() {
+        let proc = proc_arc.lock();
+        if let Some(desc_arc) = proc.get_fd(sockfd) {
+            let desc = desc_arc.lock();
+            if let FdTarget::UnixSocket(ref sock) = desc.target {
+                let sock_guard = sock.lock();
+                unsafe {
+                    let sun = &mut *(addr as *mut unix_socket::SockAddrUn);
+                    sun.sun_family = unix_socket::AF_UNIX as u16;
+                    sun.sun_path = [0; 108];
+                    if let Some(ref p) = sock_guard.path {
+                        let bytes = p.as_bytes();
+                        let copy_len = bytes.len().min(107);
+                        sun.sun_path[..copy_len].copy_from_slice(&bytes[..copy_len]);
+                    }
+                    *addrlen = core::mem::size_of::<unix_socket::SockAddrUn>() as u32;
+                }
+                return 0;
+            }
+        }
+    }
+    0
+}
+
+pub fn sys_setsockopt(_sockfd: usize, _level: i32, _optname: i32, _optval: *const u8, _optlen: u32) -> isize {
+    0
+}
+
+pub fn sys_getsockopt(_sockfd: usize, _level: i32, _optname: i32, _optval: *mut u8, optlen: *mut u32) -> isize {
+    if !optlen.is_null() {
+        unsafe { *optlen = 4; }
+    }
+    0
+}
+
+pub fn sys_socketpair(_domain: i32, sock_type: i32, _protocol: i32, sv: *mut [i32; 2]) -> isize {
+    crate::lunix_serial_println!("  [SYS_SOCKETPAIR] type={}", sock_type);
+    if sv.is_null() {
+        return -14; // -EFAULT
+    }
+
+    let s2c = alloc::sync::Arc::new(spin::Mutex::new(crate::task::pipe::PipeBuffer::new()));
+    let c2s = alloc::sync::Arc::new(spin::Mutex::new(crate::task::pipe::PipeBuffer::new()));
+
+    let sock1 = alloc::sync::Arc::new(spin::Mutex::new(unix_socket::UnixSocket {
+        id: unix_socket::NEXT_SOCKET_ID.fetch_add(1, core::sync::atomic::Ordering::Relaxed),
+        domain: unix_socket::AF_UNIX,
+        socket_type: unix_socket::SOCK_STREAM,
+        protocol: 0,
+        path: None,
+        state: unix_socket::UnixSocketState::Connected {
+            peer: None,
+            rx_buffer: c2s.clone(),
+            tx_buffer: s2c.clone(),
+        },
+        flags: if (sock_type & 0x800) != 0 { 0x800 } else { 0 },
+    }));
+
+    let sock2 = alloc::sync::Arc::new(spin::Mutex::new(unix_socket::UnixSocket {
+        id: unix_socket::NEXT_SOCKET_ID.fetch_add(1, core::sync::atomic::Ordering::Relaxed),
+        domain: unix_socket::AF_UNIX,
+        socket_type: unix_socket::SOCK_STREAM,
+        protocol: 0,
+        path: None,
+        state: unix_socket::UnixSocketState::Connected {
+            peer: Some(sock1.clone()),
+            rx_buffer: s2c,
+            tx_buffer: c2s,
+        },
+        flags: if (sock_type & 0x800) != 0 { 0x800 } else { 0 },
+    }));
+
+    if let unix_socket::UnixSocketState::Connected { ref mut peer, .. } = sock1.lock().state {
+        *peer = Some(sock2.clone());
+    }
+
+    if let Some(proc_arc) = crate::task::scheduler::get_current_process() {
+        let mut proc = proc_arc.lock();
+        if let Some(fd1) = proc.allocate_fd(crate::task::process::FileDescriptor {
+            target: FdTarget::UnixSocket(sock1),
+            flags: if (sock_type & 0x800) != 0 { 0x800 } else { 0 },
+        }) {
+            if let Some(fd2) = proc.allocate_fd(crate::task::process::FileDescriptor {
+                target: FdTarget::UnixSocket(sock2),
+                flags: if (sock_type & 0x800) != 0 { 0x800 } else { 0 },
+            }) {
+                unsafe {
+                    (*sv)[0] = fd1 as i32;
+                    (*sv)[1] = fd2 as i32;
+                }
+                return 0;
+            } else {
+                proc.close_fd(fd1);
+                return -24; // -EMFILE
+            }
+        }
+    }
+    -24
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct LinuxPollFd {
+    pub fd: i32,
+    pub events: i16,
+    pub revents: i16,
+}
+
+pub const POLLIN: i16 = 0x0001;
+pub const POLLPRI: i16 = 0x0002;
+pub const POLLOUT: i16 = 0x0004;
+pub const POLLERR: i16 = 0x0008;
+pub const POLLHUP: i16 = 0x0010;
+pub const POLLNVAL: i16 = 0x0020;
+
+pub fn sys_poll(fds: *mut LinuxPollFd, nfds: usize, timeout: i32) -> isize {
+    if fds.is_null() || nfds == 0 {
+        if timeout > 0 {
+            crate::task::scheduler::sleep_ms(timeout.min(50).max(0) as u64);
+        }
+        return 0;
+    }
+
+    let poll_slice = unsafe { slice::from_raw_parts_mut(fds, nfds) };
+    let proc_arc_opt = crate::task::scheduler::get_current_process();
+
+    let mut ready_count = 0;
+    for pfd in poll_slice.iter_mut() {
+        pfd.revents = 0;
+        if pfd.fd < 0 {
+            continue;
+        }
+
+        if let Some(ref proc_arc) = proc_arc_opt {
+            let proc = proc_arc.lock();
+            if let Some(desc_arc) = proc.get_fd(pfd.fd as usize) {
+                let desc = desc_arc.lock();
+                match desc.target {
+                    FdTarget::UnixSocket(ref sock) => {
+                        let sock_guard = sock.lock();
+                        if (pfd.events & POLLIN) != 0 && sock_guard.poll_read_ready() {
+                            pfd.revents |= POLLIN;
+                        }
+                        if (pfd.events & POLLOUT) != 0 && sock_guard.poll_write_ready() {
+                            pfd.revents |= POLLOUT;
+                        }
+                    }
+                    FdTarget::PipeRead(ref pipe) => {
+                        if (pfd.events & POLLIN) != 0 && pipe.lock().available_to_read() > 0 {
+                            pfd.revents |= POLLIN;
+                        }
+                    }
+                    FdTarget::PipeWrite(ref pipe) => {
+                        if (pfd.events & POLLOUT) != 0 && pipe.lock().available_to_write() > 0 {
+                            pfd.revents |= POLLOUT;
+                        }
+                    }
+                    FdTarget::VfsHandle { .. } | FdTarget::Stdin | FdTarget::Stdout | FdTarget::Stderr => {
+                        pfd.revents |= pfd.events & (POLLIN | POLLOUT);
+                    }
+                    _ => {
+                        pfd.revents |= pfd.events & (POLLIN | POLLOUT);
+                    }
+                }
+            } else {
+                pfd.revents = POLLNVAL;
+            }
+        }
+
+        if pfd.revents != 0 {
+            ready_count += 1;
+        }
+    }
+
+    if ready_count == 0 && timeout > 0 {
+        crate::task::scheduler::sleep_ms(timeout.min(10).max(0) as u64);
+    }
+
+    ready_count
 }
 
 pub fn sys_sendto(_sockfd: usize, buf: *const u8, len: usize, _flags: u32, _dest_addr: *const u8) -> isize {
@@ -1777,7 +2133,7 @@ fn resolve_at_path(dfd: i32, path: &str) -> alloc::string::String {
 
 pub fn sys_openat(dfd: i32, filename_ptr: *const u8, flags: u32) -> isize {
     if filename_ptr.is_null() {
-        return -1;
+        return -14;
     }
     let mut len = 0;
     unsafe {
@@ -1788,17 +2144,49 @@ pub fn sys_openat(dfd: i32, filename_ptr: *const u8, flags: u32) -> isize {
     let slice = unsafe { core::slice::from_raw_parts(filename_ptr, len) };
     let path = match core::str::from_utf8(slice) {
         Ok(p) => p,
-        Err(_) => return -1,
+        Err(_) => return -14,
     };
 
     let resolved_path = resolve_at_path(dfd, path);
+    crate::lunix_serial_println!("  [SYS_OPENAT] dfd={}, path='{}', flags=0x{:X}", dfd, resolved_path, flags);
+
+    let is_creat = (flags & 0x40) != 0;
+    let is_excl = (flags & 0x80) != 0;
+    let is_trunc = (flags & 0x200) != 0;
+    let is_append = (flags & 0x400) != 0;
 
     if let Some(proc_arc) = crate::task::scheduler::get_current_process() {
         let mut proc = proc_arc.lock();
+
+        // 1. Check if already in IN_MEMORY_FILES
+        {
+            let mem_files = IN_MEMORY_FILES.lock();
+            if let Some(buf_arc) = mem_files.get(&resolved_path).cloned() {
+                if is_creat && is_excl {
+                    return -17; // -EEXIST
+                }
+                if is_trunc {
+                    buf_arc.lock().clear();
+                }
+                let off = if is_append { buf_arc.lock().len() } else { 0 };
+                if let Some(fd) = proc.allocate_fd(crate::task::process::FileDescriptor {
+                    target: FdTarget::File {
+                        path: resolved_path.clone(),
+                        offset: off,
+                        buffer: buf_arc,
+                    },
+                    flags,
+                }) {
+                    return fd as isize;
+                }
+            }
+        }
+
+        // 2. Check Directory
         if let Ok(entries) = crate::fs::vfs::read_dir(&resolved_path) {
             if let Some(fd) = proc.allocate_fd(crate::task::process::FileDescriptor {
                 target: FdTarget::Directory {
-                    path: resolved_path,
+                    path: resolved_path.clone(),
                     entries,
                     current_idx: 0,
                 },
@@ -1806,7 +2194,13 @@ pub fn sys_openat(dfd: i32, filename_ptr: *const u8, flags: u32) -> isize {
             }) {
                 return fd as isize;
             }
-        } else if let Ok(handle) = crate::fs::vfs::open(&resolved_path) {
+        }
+
+        // 3. Check VFS Handle
+        if let Ok(handle) = crate::fs::vfs::open(&resolved_path) {
+            if is_creat && is_excl {
+                return -17; // -EEXIST
+            }
             let mut hash = 0x811c9dc5u64;
             for b in resolved_path.as_bytes() {
                 hash ^= *b as u64;
@@ -1816,24 +2210,51 @@ pub fn sys_openat(dfd: i32, filename_ptr: *const u8, flags: u32) -> isize {
             if let Some(fd) = proc.allocate_fd(crate::task::process::FileDescriptor {
                 target: FdTarget::VfsHandle {
                     handle: alloc::sync::Arc::new(Mutex::new(handle)),
-                    path: resolved_path,
+                    path: resolved_path.clone(),
                     inode_id: ino,
                 },
                 flags,
             }) {
                 return fd as isize;
             }
-        } else if let Ok(data) = crate::fs::vfs::read_to_vec(&resolved_path) {
-            let size = data.len();
+        }
+
+        // 4. Check VFS file data -> load into memory buffer
+        if let Ok(data) = crate::fs::vfs::read_to_vec(&resolved_path) {
+            if is_creat && is_excl {
+                return -17; // -EEXIST
+            }
+            let buf_arc = alloc::sync::Arc::new(spin::Mutex::new(data));
+            IN_MEMORY_FILES.lock().insert(resolved_path.clone(), buf_arc.clone());
+            if is_trunc {
+                buf_arc.lock().clear();
+            }
+            let off = if is_append { buf_arc.lock().len() } else { 0 };
             if let Some(fd) = proc.allocate_fd(crate::task::process::FileDescriptor {
                 target: FdTarget::File {
-                    path: resolved_path,
-                    offset: 0,
-                    size,
-                    data,
+                    path: resolved_path.clone(),
+                    offset: off,
+                    buffer: buf_arc,
                 },
                 flags,
             }) {
+                return fd as isize;
+            }
+        }
+
+        // 5. If not found and O_CREAT is requested, create new in-memory file
+        if is_creat {
+            let buf_arc = alloc::sync::Arc::new(spin::Mutex::new(alloc::vec::Vec::new()));
+            IN_MEMORY_FILES.lock().insert(resolved_path.clone(), buf_arc.clone());
+            if let Some(fd) = proc.allocate_fd(crate::task::process::FileDescriptor {
+                target: FdTarget::File {
+                    path: resolved_path.clone(),
+                    offset: 0,
+                    buffer: buf_arc,
+                },
+                flags,
+            }) {
+                crate::lunix_serial_println!("  [SYS_OPENAT_CREAT] Created dynamic in-memory file '{}' -> fd {}", resolved_path, fd);
                 return fd as isize;
             }
         }
@@ -1852,13 +2273,14 @@ pub fn sys_fstat(fd: usize, statbuf: *mut LinuxStat) -> isize {
         if let Some(desc_arc) = proc.get_fd(fd) {
             let desc = desc_arc.lock();
             let (size, is_dir, ino) = match desc.target {
-                FdTarget::File { ref path, size, .. } => {
+                FdTarget::File { ref path, ref buffer, .. } => {
+                    let size = buffer.lock().len() as i64;
                     let mut hash = 0x811c9dc5u64;
                     for b in path.as_bytes() {
                         hash ^= *b as u64;
                         hash = hash.wrapping_mul(0x1000193);
                     }
-                    (size as i64, false, hash)
+                    (size, false, hash)
                 }
                 FdTarget::VfsHandle { ref handle, inode_id, .. } => {
                     let h = handle.lock();
@@ -1925,6 +2347,34 @@ pub fn sys_fstatat(dfd: i32, filename_ptr: *const u8, statbuf: *mut LinuxStat, f
         Err(_) => return -2,
     };
     let resolved = resolve_at_path(dfd, path);
+
+    // 1. Check IN_MEMORY_FILES
+    if let Some(buf_arc) = IN_MEMORY_FILES.lock().get(&resolved).cloned() {
+        let size = buf_arc.lock().len() as i64;
+        let mut hash = 0x811c9dc5u64;
+        for b in resolved.as_bytes() {
+            hash ^= *b as u64;
+            hash = hash.wrapping_mul(0x1000193);
+        }
+        unsafe {
+            let st = &mut *statbuf;
+            st.st_dev = 1;
+            st.st_ino = hash;
+            st.st_nlink = 1;
+            st.st_mode = 0o100755;
+            st.st_uid = 0;
+            st.st_gid = 0;
+            st.st_rdev = 0;
+            st.st_size = size;
+            st.st_blksize = 512;
+            st.st_blocks = (size + 511) / 512;
+            st.st_atime = 1726000000;
+            st.st_mtime = 1726000000;
+            st.st_ctime = 1726000000;
+        }
+        return 0;
+    }
+
     if let Ok(inode) = crate::fs::vfs::stat(&resolved) {
         let mut hash = 0x811c9dc5u64;
         for b in resolved.as_bytes() {
@@ -2164,9 +2614,21 @@ pub fn sys_unlink(path_ptr: *const u8) -> isize {
     sys_unlinkat(-100, path_ptr, 0)
 }
 
-pub fn sys_unlinkat(_dfd: i32, filename_ptr: *const u8, _flags: u32) -> isize {
+pub fn sys_unlinkat(dfd: i32, filename_ptr: *const u8, _flags: u32) -> isize {
     if filename_ptr.is_null() {
         return -14;
+    }
+    let mut len = 0;
+    unsafe {
+        while *filename_ptr.add(len) != 0 && len < 256 {
+            len += 1;
+        }
+    }
+    let slice = unsafe { core::slice::from_raw_parts(filename_ptr, len) };
+    if let Ok(path) = core::str::from_utf8(slice) {
+        let resolved = resolve_at_path(dfd, path);
+        crate::lunix_serial_println!("  [SYS_UNLINK] unlinking '{}'", resolved);
+        IN_MEMORY_FILES.lock().remove(&resolved);
     }
     0 // Unlink OK
 }

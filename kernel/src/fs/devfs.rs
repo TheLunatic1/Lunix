@@ -299,8 +299,8 @@ impl FileSystem for DevFs {
             "urandom" | "random" => Ok(Box::new(RandomHandle)),
             "tty" | "console" | "tty0" | "tty1" | "tty2" | "ptmx" | "pts/0" | "pts/1" => Ok(Box::new(TtyHandle)),
             "fb0" | "fb/0" | "graphics/fb0" => Ok(Box::new(FbHandle::new())),
-            "mice" | "input/mice" => Ok(Box::new(MiceHandle)),
-            "input/event0" => Ok(Box::new(MiceHandle)),
+            "mice" | "mouse" | "input/mice" | "input/mouse" | "input/event0" => Ok(Box::new(MiceHandle)),
+            "input/mice0" | "input/mice1" => Ok(Box::new(MiceHandle)),
             "sda" => Ok(Box::new(BlockDevHandle {
                 position: 0,
                 size: 64 * 1024 * 1024,
@@ -446,19 +446,12 @@ impl FileSystem for DevFs {
                 permissions: 0o666,
                 name: String::from("fb0"),
             }),
-            "mice" | "input/mice" => Ok(INode {
+            "mice" | "mouse" | "input/mice" | "input/mouse" | "input/event0" | "input/mice0" | "input/mice1" => Ok(INode {
                 id: 10,
                 size: 0,
                 node_type: INodeType::CharDevice,
                 permissions: 0o666,
                 name: String::from("mice"),
-            }),
-            "input/event0" => Ok(INode {
-                id: 11,
-                size: 0,
-                node_type: INodeType::CharDevice,
-                permissions: 0o666,
-                name: String::from("event0"),
             }),
             "sda" => Ok(INode {
                 id: 8,

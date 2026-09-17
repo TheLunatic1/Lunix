@@ -558,13 +558,11 @@ pub fn sys_win32_create_file(
         if let Some(proc_arc) = scheduler::get_current_process() {
             let mut proc = proc_arc.lock();
             if let Ok(data) = vfs::read_to_vec(path) {
-                let size = data.len();
                 if let Some(fd) = proc.allocate_fd(crate::task::process::FileDescriptor {
                     target: crate::task::process::FdTarget::File {
                         path: alloc::string::String::from(path),
                         offset: 0,
-                        size,
-                        data,
+                        buffer: alloc::sync::Arc::new(spin::Mutex::new(data)),
                     },
                     flags: 0,
                 }) {

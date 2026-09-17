@@ -260,7 +260,9 @@ fn create_dir_all_fs<T: Read + Write + std::io::Seek>(
         let next = match cur.open_dir(seg) {
             Ok(d) => d,
             Err(_) => {
-                let _ = cur.create_dir(seg);
+                if let Err(e) = cur.create_dir(seg) {
+                    eprintln!("[WARN] create_dir_all_fs create_dir '{}' in '{}' failed: {:?}", seg, path, e);
+                }
                 cur.open_dir(seg)
                     .with_context(|| format!("create_dir_all_fs failed to open directory '{}' in path '{}'", seg, path))?
             }
@@ -289,7 +291,9 @@ fn write_file_to_fs<T: Read + Write + std::io::Seek>(
         let next = match cur.open_dir(seg) {
             Ok(d) => d,
             Err(_) => {
-                let _ = cur.create_dir(seg);
+                if let Err(e) = cur.create_dir(seg) {
+                    eprintln!("[WARN] write_file_to_fs create_dir '{}' for '{}' failed: {:?}", seg, path, e);
+                }
                 cur.open_dir(seg)
                     .with_context(|| format!("write_file_to_fs failed to open directory '{}' for file '{}'", seg, path))?
             }
@@ -315,7 +319,7 @@ fn create_fat32_image(img_path: &Path, bootloader_bin: &Path, kernel_bin: &Path)
         .with_context(|| format!("Failed to open {}", kernel_bin.display()))?
         .read_to_end(&mut kernel_bytes)?;
 
-    let total_disk_size: usize = 268 * 1024 * 1024; // 268 MiB total disk
+    let total_disk_size: usize = 512 * 1024 * 1024; // 512 MiB total disk
     let total_sectors = (total_disk_size / 512) as u64;
     let partition_start_lba: u64 = 2048; // 1 MiB alignment
     let partition_end_lba: u64 = total_sectors - 34; // Leaves 33 sectors for Backup GPT table & header
@@ -327,13 +331,19 @@ fn create_fat32_image(img_path: &Path, bootloader_bin: &Path, kernel_bin: &Path)
 
     fatfs::format_volume(
         &mut part_buf,
-        fatfs::FormatVolumeOptions::new().fat_type(fatfs::FatType::Fat32),
+        fatfs::FormatVolumeOptions::new()
+            .fat_type(fatfs::FatType::Fat32)
+            .bytes_per_cluster(4096),
     )?;
 
     {
         let fs = fatfs::FileSystem::new(&mut part_buf, fatfs::FsOptions::new())?;
 
-        // 1. Unpack upstream official Tiny Core Linux rootfs (corepure64.gz) if available
+        // 1. Install Lunix Bootloader and Core Kernel FIRST
+        write_file_to_fs(&fs, "EFI/BOOT/BOOTX64.EFI", &bootloader_bytes)?;
+        write_file_to_fs(&fs, "LUNIX/KERNEL.BIN", &kernel_bytes)?;
+
+        // 2. Unpack upstream official Tiny Core Linux rootfs (corepure64.gz) if available
         let root = get_workspace_root();
         let core_gz_path = root.join("target").join("corepure64.gz");
         let mut file_map: HashMap<String, Vec<u8>> = HashMap::new();
@@ -392,11 +402,69 @@ fn create_fat32_image(img_path: &Path, bootloader_bin: &Path, kernel_bin: &Path)
             }
         }
 
-        // 2. Install Lunix Bootloader and Core Kernel
-        write_file_to_fs(&fs, "EFI/BOOT/BOOTX64.EFI", &bootloader_bytes)?;
-        write_file_to_fs(&fs, "LUNIX/KERNEL.BIN", &kernel_bytes)?;
+        // 3. Extract and integrate official Tiny Core GUI TCZ extensions
+        let iso_path = root.join("target").join("TinyCorePure64.iso");
+        let tcz_all_dir = root.join("target").join("scratch").join("tcz_all");
 
-        // 3. Install Standalone User ELF & Win32 PE Test Suite
+        if !tcz_all_dir.is_dir() && iso_path.is_file() {
+            println!("[+] Extracting 33 official Tiny Core Linux GUI packages (.tcz) from ISO...");
+            let cde_raw = root.join("target").join("scratch").join("tcz_raw");
+            let _ = std::fs::create_dir_all(&cde_raw);
+            let _ = std::fs::create_dir_all(&tcz_all_dir);
+            let _ = Command::new("7z")
+                .args(["x", "-y", &format!("-o{}", cde_raw.display()), &iso_path.to_string_lossy(), "cde/optional/*.tcz"])
+                .output();
+
+            let opt_dir = cde_raw.join("cde").join("optional");
+            if opt_dir.is_dir() {
+                if let Ok(entries) = std::fs::read_dir(opt_dir) {
+                    for entry in entries.flatten() {
+                        let path = entry.path();
+                        if path.extension().and_then(|s| s.to_str()) == Some("tcz") {
+                            let _ = Command::new("7z")
+                                .args(["x", "-y", &format!("-o{}", tcz_all_dir.display()), &path.to_string_lossy()])
+                                .output();
+                        }
+                    }
+                }
+            }
+        }
+
+        if tcz_all_dir.is_dir() {
+            println!("[+] Ingesting official Tiny Core Desktop packages (Xfbdev, flwm, wbar, aterm, cpanel, editor)...");
+            let mut tcz_count = 0;
+            fn walk_and_write(fs: &fatfs::FileSystem<&mut std::io::Cursor<Vec<u8>>>, dir: &Path, base: &Path, count: &mut usize) -> Result<()> {
+                if let Ok(entries) = std::fs::read_dir(dir) {
+                    for entry in entries.flatten() {
+                        let p = entry.path();
+                        let rel = p.strip_prefix(base).unwrap().to_string_lossy().replace('\\', "/");
+                        if p.is_dir() {
+                            let _ = create_dir_all_fs(fs, &rel);
+                            walk_and_write(fs, &p, base, count)?;
+                        } else if p.is_file() {
+                            if let Ok(data) = std::fs::read(&p) {
+                                let _ = write_file_to_fs(fs, &rel, &data);
+                                *count += 1;
+
+                                // Mirror shared libraries (.so) to /lib and /usr/lib for universal dynamic linking
+                                if rel.starts_with("usr/local/lib/") && (rel.ends_with(".so") || rel.contains(".so.")) {
+                                    let lib_rel = rel.trim_start_matches("usr/local/lib/");
+                                    if !lib_rel.contains('/') {
+                                        let _ = write_file_to_fs(fs, &format!("lib/{}", lib_rel), &data);
+                                        let _ = write_file_to_fs(fs, &format!("usr/lib/{}", lib_rel), &data);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                Ok(())
+            }
+            let _ = walk_and_write(&fs, &tcz_all_dir, &tcz_all_dir, &mut tcz_count);
+            println!("    -> Successfully ingested {} official Tiny Core GUI files into FAT32 rootfs", tcz_count);
+        }
+
+        // 4. Install Standalone User ELF & Win32 PE Test Suite
         write_file_to_fs(&fs, "bin/hello.elf", &create_hello_elf())?;
         write_file_to_fs(&fs, "bin/sysinfo.elf", &create_sysinfo_elf())?;
         write_file_to_fs(&fs, "bin/test_fork.elf", &create_test_fork_elf())?;
@@ -412,7 +480,7 @@ fn create_fat32_image(img_path: &Path, bootloader_bin: &Path, kernel_bin: &Path)
         write_file_to_fs(&fs, "bin/test_dynamic.elf", &create_dynamic_test_elf())?;
         write_file_to_fs(&fs, "lib/ld-linux-test.so.2", &create_ld_linux_so())?;
 
-        // 4. If upstream BusyBox was not in archive, provide fallback BusyBox & Glibc
+        // 5. If upstream BusyBox was not in archive, provide fallback BusyBox & Glibc
         let busybox_elf = create_busybox_elf();
         if !file_map.contains_key("bin/busybox") {
             write_file_to_fs(&fs, "bin/busybox", &busybox_elf)?;
@@ -429,16 +497,16 @@ fn create_fat32_image(img_path: &Path, bootloader_bin: &Path, kernel_bin: &Path)
             write_file_to_fs(&fs, "lib64/ld-linux-x86-64.so.2", &ld_so_bytes)?;
         }
 
-        // 5. Install Windows NT Sample Driver
+        // 6. Install Windows NT Sample Driver
         let sample_wdm = create_sample_wdm_sys();
         write_file_to_fs(&fs, "sys/drivers/sample_wdm.sys", &sample_wdm)?;
         write_file_to_fs(&fs, "bin/sample_wdm.sys", &sample_wdm)?;
 
-        // 6. Setup /etc configuration files
+        // 7. Setup /etc configuration files
         let inittab_data = b"::sysinit:/etc/init.d/rcS\ntty1::respawn:/bin/sh\n::ctrlaltdel:/sbin/reboot\n::shutdown:/sbin/halt\n";
         write_file_to_fs(&fs, "etc/inittab", inittab_data)?;
 
-        let rcs_data = b"#!/bin/sh\necho '[BOOT] Running /etc/init.d/rcS system startup scripts...'\n[ -f /proc/cmdline ] || /bin/mount /proc\n/bin/mount -o remount,rw /\n/bin/hostname box\nexport PATH=/bin:/usr/bin:/sbin:/usr/sbin\nexport USER=tc\nexport HOME=/home/tc\nexport SHELL=/bin/sh\n";
+        let rcs_data = b"#!/bin/sh\necho '[BOOT] Running /etc/init.d/rcS system startup scripts...'\n[ -f /proc/cmdline ] || /bin/mount /proc\n/bin/mount -o remount,rw /\n/bin/hostname box\nexport PATH=/bin:/usr/bin:/sbin:/usr/sbin:/usr/local/bin\nexport LD_LIBRARY_PATH=/usr/local/lib:/usr/lib:/lib:/lib64:/usr/lib64\nexport USER=tc\nexport HOME=/home/tc\nexport SHELL=/bin/sh\n";
         write_file_to_fs(&fs, "etc/init.d/rcS", rcs_data)?;
 
         let passwd_data = b"root:x:0:0:root:/root:/bin/sh\ntc:x:1001:1001:tc:/home/tc:/bin/sh\n";
@@ -457,22 +525,42 @@ fn create_fat32_image(img_path: &Path, bootloader_bin: &Path, kernel_bin: &Path)
         write_file_to_fs(&fs, "etc/os-release", os_rel_data)?;
 
         write_file_to_fs(&fs, "etc/hostname", b"box\n")?;
+        write_file_to_fs(&fs, "etc/ld.so.conf", b"/lib\n/usr/lib\n/usr/local/lib\n/lib64\n/usr/lib64\n")?;
 
-        // 7. Setup user profiles
-        let tc_profile = b"export USER=\"tc\"\nexport HOME=\"/home/tc\"\nexport SHELL=\"/bin/sh\"\nexport PATH=\"/bin:/usr/bin:/sbin:/usr/sbin\"\necho 'Welcome to Tiny Core Linux on Lunix!'\n";
+        // 8. Setup Tiny Core Desktop Configuration
+        let _ = create_dir_all_fs(&fs, "etc/sysconfig");
+        write_file_to_fs(&fs, "etc/sysconfig/Xserver", b"Xfbdev\n")?;
+        write_file_to_fs(&fs, "etc/sysconfig/desktop", b"flwm\n")?;
+        write_file_to_fs(&fs, "etc/sysconfig/icons", b"wbar\n")?;
+        write_file_to_fs(&fs, "etc/sysconfig/tcuser", b"tc\n")?;
+        write_file_to_fs(&fs, "etc/sysconfig/tcedir", b"/tce\n")?;
+
+        // 9. Setup user profiles & desktop sessions
+        let _ = create_dir_all_fs(&fs, "home/tc");
+        let tc_profile = b"export USER=\"tc\"\nexport HOME=\"/home/tc\"\nexport SHELL=\"/bin/sh\"\nexport PATH=\"/bin:/usr/bin:/sbin:/usr/sbin:/usr/local/bin\"\nexport LD_LIBRARY_PATH=\"/usr/local/lib:/usr/lib:/lib:/lib64:/usr/lib64\"\nexport DISPLAY=\":0.0\"\necho 'Welcome to Tiny Core Linux on Lunix!'\n";
         write_file_to_fs(&fs, "home/tc/.profile", tc_profile)?;
-        write_file_to_fs(&fs, "home/tc/readme.txt", b"Tiny Core Linux v15.0 userspace running on 100% pure Rust Lunix Kernel.\n")?;
+        write_file_to_fs(&fs, "home/tc/readme.txt", b"Tiny Core Linux v15.0 FLWM + Wbar Graphical Desktop running on 100% pure Rust Lunix Kernel.\n")?;
 
-        let lunix_readme = b"Welcome to Lunix OS!\n\nA from-scratch hybrid operating system kernel written in 100% pure Rust.\nCombines Windows NT Driver Model (WDM) with Linux POSIX ABI & ELF64 execution.\n\nType 'help' to explore all Linux shell commands or 'gui' for LunixWM desktop.\n";
+        let xsession_data = b"#!/bin/sh\n# Tiny Core Linux Official Desktop Session\nexport DISPLAY=:0.0\nexport HOME=/home/tc\nexport USER=tc\nexport DESKTOP=flwm\nexport ICONS=wbar\nexport LD_LIBRARY_PATH=/usr/local/lib:/usr/lib:/lib:/lib64:/usr/lib64\nexport PATH=/bin:/usr/bin:/sbin:/usr/sbin:/usr/local/bin\n\n/usr/local/bin/Xfbdev -br -screen 1024x768x32 -mouse /dev/input/mice,3 &\nexport XPID=$!\n/bin/sleep 1\n/usr/local/bin/flwm &\n/usr/local/bin/wbar -bpress -pos bottom -zoomf 2 -isize 32 &\n/usr/local/bin/aterm -geometry 80x24+50+50 &\n";
+        write_file_to_fs(&fs, "home/tc/.xsession", xsession_data)?;
+
+        let wbar_data = b"i: /usr/local/share/wbar/osxbarback.png\nt: /usr/local/lib/X11/fonts/TTF/luxisr/11\nc: wbar -bpress -pos bottom -zoomf 2 -isize 32\n\ni: /usr/local/share/pixmaps/terminal.png\nt: Terminal\nc: aterm\n\ni: /usr/local/share/pixmaps/editor.png\nt: Editor\nc: editor\n\ni: /usr/local/share/pixmaps/cpanel.png\nt: ControlPanel\nc: cpanel\n\ni: /usr/local/share/pixmaps/exit.png\nt: Exit\nc: exittc\n";
+        write_file_to_fs(&fs, "home/tc/.wbar", wbar_data)?;
+        write_file_to_fs(&fs, "home/tc/.setbackground", b"#!/bin/sh\n/usr/local/bin/hsetroot -solid '#2d415f'\n")?;
+
+        let lunix_readme = b"Welcome to Lunix OS!\n\nA from-scratch hybrid operating system kernel written in 100% pure Rust.\nCombines Windows NT Driver Model (WDM) with Linux POSIX ABI & ELF64 execution.\n\nType 'startx' to launch the official Tiny Core FLWM + Wbar Graphical Desktop.\n";
         write_file_to_fs(&fs, "home/lunix/readme.txt", lunix_readme)?;
 
-        // 8. Ensure basic directory tree exists
-        let _ = create_dir_all_fs(&fs, "tmp");
+        // 10. Ensure directories exist
+        let _ = create_dir_all_fs(&fs, "tmp/.X11-unix");
         let _ = create_dir_all_fs(&fs, "var/run");
         let _ = create_dir_all_fs(&fs, "var/log");
         let _ = create_dir_all_fs(&fs, "usr/bin");
         let _ = create_dir_all_fs(&fs, "usr/sbin");
         let _ = create_dir_all_fs(&fs, "usr/lib");
+        let _ = create_dir_all_fs(&fs, "usr/local/bin");
+        let _ = create_dir_all_fs(&fs, "usr/local/lib");
+        let _ = create_dir_all_fs(&fs, "tce/optional");
     }
 
     // Construct the complete GPT + Protective MBR disk image
