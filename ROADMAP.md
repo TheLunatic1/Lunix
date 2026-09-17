@@ -252,16 +252,40 @@ graph TD
 
 ---
 
-### Milestone 8: Hardware Graphics Acceleration (VirtIO-GPU / DRM)
-**Objective**: Implement 2D/3D hardware graphics acceleration via VirtIO-GPU and Linux Direct Rendering Manager (DRM / KMS) interfaces for high-performance window compositing and X11/Wayland support.
+### Milestone 8: Authentic Tiny Core Linux Graphical Desktop Environment (Xfbdev + flwm + wbar + aterm + FLTK Apps)
+**Objective**: Run the authentic, official upstream Tiny Core Linux Graphical Desktop Environment (`Xfbdev` X11 framebuffer server, `flwm` window manager, `wbar` animated icon dock, `aterm` terminal, `cpanel`, `editor`, and FLTK 1.3 apps) directly on the 100% pure Rust bare-metal Lunix hybrid kernel via `/dev/fb0` GOP MMIO and `AF_UNIX` local IPC sockets.
 
-#### 8.1 VirtIO-GPU Driver & 2D/3D Command Submission
+#### 8.1 Official Upstream TCZ Package Ingestion (33 Extensions)
+- [x] Extract and ingest all 33 official `.tcz` packages from `target/TinyCorePure64.iso` (~686 files, 43.5 MB) directly into `/usr/local/` and `/home/tc/` on the 268 MiB FAT32 root disk image (`target/lunix.img`).
+- [x] Installed packages: `Xfbdev.tcz`, `flwm.tcz`, `wbar.tcz`, `aterm.tcz`, `fltk-1.3.tcz`, `Xprogs.tcz` (`cpanel`, `editor`, `mnttool`, `mousetool`), `Xlibs.tcz`, `libX11.tcz`, `imlib2.tcz`, `freetype.tcz`, `libpng.tcz`, `libXfont.tcz`, `hsetroot.tcz`.
+
+#### 8.2 UNIX Domain Sockets (`AF_UNIX` / `AF_LOCAL`)
+- [x] Implemented in-memory bidirectional stream sockets (`UnixSocket`, `UNIX_SOCKET_REGISTRY`) in `kernel/src/syscall/unix_socket.rs`.
+- [x] Supports `sys_socket` (`AF_UNIX`, `SOCK_STREAM`), `sys_bind` (`/tmp/.X11-unix/X0`), `sys_listen`, `sys_connect`, `sys_accept`, `sys_getsockname`, `sys_getpeername`.
+- [x] Duplex IPC pipelines backed by circular `PipeBuffer` queues for high-speed client/server event streaming between `Xfbdev` and clients.
+- [x] Integrated with `sys_poll` and `sys_select` for non-blocking event loops.
+
+#### 8.3 Desktop Environment Startup & Session Management
+- [x] Configured `/etc/sysconfig/` (`Xserver` -> `Xfbdev`, `desktop` -> `flwm`, `icons` -> `wbar`, `tcuser` -> `tc`, `tcedir` -> `/tce`).
+- [x] Configured `/home/tc/.xsession`, `/home/tc/.wbar`, `/home/tc/.setbackground`, and `/tmp/.X11-unix/`.
+- [x] Added `startx` and `desktop` interactive kernel shell launcher commands.
+
+#### 8.4 Verification & Success Criteria
+- [x] `tests/test_tinycore_gui.py` passing 100% (19/19 checks) in QEMU.
+- [x] Full regression test suite passing 100% across all Milestones 1 through 8.
+
+---
+
+### Milestone 9: Hardware Graphics Acceleration (VirtIO-GPU / DRM)
+**Objective**: Implement 2D/3D hardware graphics acceleration via VirtIO-GPU and Linux Direct Rendering Manager (DRM / KMS) interfaces for high-performance window compositing and X11/Wayland acceleration.
+
+#### 9.1 VirtIO-GPU Driver & 2D/3D Command Submission
 - [ ] Probe PCI class `0x03` subclass `0x00` prog-if `0x00` for VirtIO GPU device (`0x1AF4:0x1050`).
 - [ ] Configure Split VirtQueues (`ctrlq`, `cursorq`).
 - [ ] Implement 2D Resource Creation, 2D Resource Attach Backing, Set Scanout, and Transfer to Host 2D.
 - [ ] Implement VirGL 3D Command Submission for hardware-accelerated OpenGL / Vulkan primitives.
 
-#### 8.2 Linux Direct Rendering Manager (`/dev/dri/card0`, `/dev/dri/renderD128`)
+#### 9.2 Linux Direct Rendering Manager (`/dev/dri/card0`, `/dev/dri/renderD128`)
 - [ ] Implement character device nodes `/dev/dri/card0` and `/dev/dri/renderD128`.
 - [ ] Implement DRM KMS ioctls: `DRM_IOCTL_VERSION`, `DRM_IOCTL_GET_RESOURCES`, `DRM_IOCTL_MODE_GETCONNECTOR`, `DRM_IOCTL_MODE_GETCRTC`, `DRM_IOCTL_MODE_SETCRTC`, `DRM_IOCTL_MODE_CREATE_DUMB`, `DRM_IOCTL_MODE_MAP_DUMB`, `DRM_IOCTL_MODE_ADDFB`, `DRM_IOCTL_MODE_RMFB`.
 - [ ] Support page flipping with VSync interrupt synchronization.
@@ -294,7 +318,8 @@ graph TD
 | **AHCI / NVMe / VirtIO & Expanded WDM Drivers** | ✅ **Complete** | **Milestone 5** |
 | **Official Tiny Core Rootfs, /dev/fb0 & VMware VMDK** | ✅ **Complete** | **Milestone 6** |
 | **Real Linux Userspace Bootstrap & Address Space Isolation** | ✅ **Complete** | **Milestone 7** |
-| Hardware Graphics Acceleration (VirtIO-GPU / DRM) | ⏳ Planned | Milestone 8 |
+| **Official Tiny Core GUI (flwm, wbar, Xfbdev, AF_UNIX)** | ✅ **Complete** | **Milestone 8** |
+| Hardware Graphics Acceleration (VirtIO-GPU / DRM) | ⏳ Planned | Milestone 9 |
 
 
 

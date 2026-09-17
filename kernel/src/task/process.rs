@@ -14,8 +14,7 @@ pub enum FdTarget {
     File {
         path: String,
         offset: usize,
-        size: usize,
-        data: Vec<u8>,
+        buffer: Arc<Mutex<Vec<u8>>>,
     },
     Directory {
         path: String,
@@ -25,6 +24,7 @@ pub enum FdTarget {
     PipeRead(Arc<Mutex<crate::task::pipe::PipeBuffer>>),
     PipeWrite(Arc<Mutex<crate::task::pipe::PipeBuffer>>),
     Socket(usize),
+    UnixSocket(Arc<Mutex<crate::syscall::unix_socket::UnixSocket>>),
     VfsHandle {
         handle: Arc<Mutex<Box<dyn crate::fs::file::FileHandle>>>,
         path: String,

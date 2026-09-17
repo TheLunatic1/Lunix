@@ -406,15 +406,29 @@ The kernel boots into an interactive graphical console with an IBM VGA font disp
   - Added `fs_base` tracking to `ThreadControlBlock` (`Thread`).
   - Extended scheduler context switch in `Scheduler::schedule()` to read `old_thread.fs_base = rdmsr(0xC000_0100)` and write `wrmsr(0xC000_0100, next_fs_base)`.
   - Integrated `set_current_thread_fs_base` into `sys_arch_prctl` and `exec_elf_replace` for instant synchronization with glibc/musl `pthread_t` runtime structures.
-- **PID 1 `/sbin/init` & `/etc/init.d/rcS` Userspace Bootstrapper**:
-  - Added kernel `tinycore` command and automated test orchestrator bootstrapping PID 1 `/sbin/init`.
-  - Parses `/etc/inittab`, executes `/etc/init.d/rcS` sysinit scripts, mounts `/proc`, `/sys`, `/dev` via `/bin/mount`, and gracefully drops to shell upon completion.
-  - Implemented `sys_wait4` status reaping with correct `wstatus` formatting (`WEXITSTATUS`), unblocking parent processes upon child exit.
-- **Full Compatibility Suite**:
-  - Linux dynamic ELF binaries with GNU Glibc 2.38 (`/lib/ld-linux-x86-64.so.2`, `libc.so.6`).
-  - BusyBox multi-call userspace tools.
-  - Windows NT Win32 PE32+ executables (`kernel32.dll`, Win32 Environment Block, In-Memory Registry, Named Pipes, Directory Find API).
-  - 100% automated verification passing across all Linux and Windows test binaries.
+### Phase 20: Milestone 8 — Authentic Tiny Core Linux Graphical Desktop Environment (Xfbdev + flwm + wbar + aterm + FLTK Apps)
+- **Official Upstream TCZ Package Ingestion (33 Extensions)**:
+  - Ingests all 33 official `.tcz` packages from `TinyCorePure64.iso` (~686 files, 43.5 MB) directly into `/usr/local/` and `/home/tc/` on the 268 MiB FAT32 root disk image (`target/lunix.img`).
+  - Packages include: `Xfbdev.tcz` (X11 Framebuffer Server), `flwm.tcz` (Fast Light Window Manager), `wbar.tcz` (Animated Icon Dock), `aterm.tcz` (Terminal Emulator), `fltk-1.3.tcz` (C++ GUI Widget Toolkit), `Xprogs.tcz` (Control Panel `cpanel`, Editor `editor`, Mount Tool `mnttool`, Mouse Tool `mousetool`), `Xlibs.tcz`, `libX11.tcz`, `imlib2.tcz`, `freetype.tcz`, `libpng.tcz`, `libXfont.tcz`, `hsetroot.tcz`.
+- **UNIX Domain Socket Subsystem (`AF_UNIX` / `AF_LOCAL`)**:
+  - Implemented `UnixSocket` and global `UNIX_SOCKET_REGISTRY` in `kernel/src/syscall/unix_socket.rs`.
+  - Supports `sys_socket` (`AF_UNIX`, `SOCK_STREAM`), `sys_bind` (`/tmp/.X11-unix/X0`), `sys_listen`, `sys_connect`, `sys_accept`, `sys_getsockname`, `sys_getpeername`.
+  - Bidirectional in-memory stream IPC using circular `PipeBuffer` queues for high-throughput X11 client/server event loops between `Xfbdev` and clients (`flwm`, `wbar`, `aterm`, `cpanel`, `editor`).
+  - Integrated with `sys_poll` and `sys_select` for event readiness (`POLLIN`, `POLLOUT`).
+- **Linux Framebuffer (`/dev/fb0`) & Input Streaming**:
+  - Direct GOP physical MMIO page mapping via `sys_mmap` on `/dev/fb0`.
+  - Framebuffer control ioctls: `FBIOGET_VSCREENINFO`, `FBIOPUT_VSCREENINFO`, `FBIOGET_FSCREENINFO`.
+  - PS/2 3-byte mouse packet streaming on `/dev/input/mice` and `/dev/input/event0`.
+  - Terminal stream and keyboard handling on `/dev/tty0`..`/dev/tty2` and `/dev/console`.
+- **Desktop Environment Startup & Sessions**:
+  - Configured `/etc/sysconfig/` (`Xserver` -> `Xfbdev`, `desktop` -> `flwm`, `icons` -> `wbar`, `tcuser` -> `tc`, `tcedir` -> `/tce`).
+  - Created `/home/tc/.xsession` launching `Xfbdev -br -screen 1024x768x32 -mouse /dev/input/mice,3`, `flwm`, `wbar -bpress -pos bottom -zoomf 2 -isize 32`, and `aterm -geometry 80x24+50+50`.
+  - Created `/home/tc/.wbar`, `/home/tc/.setbackground`, `/home/tc/.profile`, `/etc/ld.so.conf`, and verified `/tmp/.X11-unix/`.
+  - Shell commands `startx` and `desktop` automatically launch the authentic Tiny Core Linux Graphical Desktop.
+- **Automated Verification**:
+  - `tests/test_tinycore_gui.py` verified 100% (19/19 checks passed).
+  - `tests/test_tinycore_upstream.py` verified 100% (19/19 checks passed).
+
 
 
 
