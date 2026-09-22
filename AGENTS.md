@@ -6,17 +6,17 @@
 
 ## 1. Project Overview & Philosophy
 
-**Lunix** is an independent, from-scratch 64-bit operating system kernel, window compositor, and custom UEFI bootloader written in 100% pure Rust (`#![no_std]`, `#![no_main]`).
+**Lunix** is an independent, from-scratch 64-bit operating system kernel, window compositor, and custom UEFI bootloader written in 100% pure Rust (`#![no_std]`, `#![no_main]`), designed as a direct 1:1 Rust bare-metal implementation of the **Linux Kernel (`torvalds/linux` git repo architecture to present date)**.
 
 ### Core Design Principles:
-1. **Pure Rust Bare-Metal**: No Linux kernel code, no GRUB/Limine, and no external C runtimes.
+1. **Pure Rust Bare-Metal Linux Kernel**: No external C runtimes, no GRUB/Limine, and no Windows NT/WDM code. 100% pure Rust `#![no_std]` implementation of Linux kernel subsystems.
 2. **Direct UEFI Boot**: Boots via our custom Rust UEFI bootloader (`lunix-bootloader.efi`) with automated GOP resolution, ACPI RSDP discovery, and ELF64 segment mapping.
 3. **SMP Multi-Core & APIC**: ACPI 2.0 parser, Local APIC, IOAPIC routing, calibrated APIC timer, and 16-bit real-mode AP trampoline waking secondary CPU cores via INIT-SIPI-SIPI.
-4. **VFS & FAT32 Storage**: Unified `BlockDevice` layer, IDE/ATA PIO driver (`/dev/sda`), and clean FAT32 filesystem mounted as `/`.
-5. **Preemptive Multitasking**: Thread/Process management, assembly context switching, priority round-robin scheduler, and synchronization primitives (`Mutex`, `Semaphore`, `WaitQueue`).
-6. **Ring 3 User Mode & Syscall ABI**: DPL=3 GDT selectors, TSS privilege stack table, fast MSR `syscall`/`sysret` dispatcher (`IA32_STAR`, `IA32_LSTAR`, `IA32_FMASK`), and reentrant syscall stack isolation.
-7. **Windows NT Driver Subsystem**: Native Windows Driver Model (WDM) compatibility layer executing PE32+ drivers via Rust's native `extern "win64"` ABI with `ntoskrnl.exe` and `hal.dll` DDI shims and IRP dispatching.
-8. **32-bit Graphical Compositor & LunixWM**: Double-buffered window manager with wallpaper gradient, drop shadows, window chrome, taskbar, PS/2 mouse driver, and multi-window application suite (System Monitor, NT Driver Manager, File Explorer, Terminal).
+4. **VFS & Linux Virtual Filesystems**: Unified `BlockDevice` layer, IDE/ATA PIO driver (`/dev/sda`), root FAT32 filesystem (`/`), character device filesystem (`devfs` at `/dev`), dynamic system info filesystem (`procfs` at `/proc`), and kernel object filesystem (`sysfs` at `/sys`).
+5. **Preemptive Multitasking & Linux Process Model**: Complete Linux process hierarchy (`task_struct`, `ProcessControlBlock`, `ThreadControlBlock`), assembly context switching, priority round-robin scheduler, and synchronization primitives (`Mutex`, `Semaphore`, `WaitQueue`, `Futex`).
+6. **Ring 3 User Mode & Linux x86_64 Syscall ABI**: DPL=3 GDT selectors, TSS privilege stack table, fast MSR `syscall`/`sysret` dispatcher (`IA32_STAR`, `IA32_LSTAR`, `IA32_FMASK`), reentrant syscall stack isolation, and full standard Linux x86_64 syscall interface (process lifecycle, memory management, VFS hardlinks/symlinks, credentials, unix sockets, epoll, timerfd, eventfd).
+7. **Official Linux Distro & X11 Desktop Runtime**: Full upstream userland execution supporting Tiny Core Linux x86_64 binaries, `glibc` / `ld-linux-x86-64.so.2` dynamic linking, `Xfbdev` framebuffer X server, `flwm` window manager, and `wbar` dock.
+8. **32-bit Graphical Compositor & LunixWM**: Double-buffered desktop window manager with wallpaper gradient, drop shadows, window chrome, taskbar, PS/2 mouse driver, and multi-window application suite (System Monitor, File Explorer, Terminal).
 
 ---
 
@@ -77,33 +77,35 @@ d:\REPOSITORIES\Lunix
 │       │   ├── timer.rs          # APIC / PIT timer (1000 Hz / 1ms ticks)
 │       │   ├── keyboard.rs       # PS/2 Keyboard scancode set 1 & interactive shell
 │       │   ├── mouse.rs          # PS/2 3-byte mouse packet streaming & pointer state
-│       │   └── storage/          # Block storage (ATA/IDE PIO driver)
+│       │   ├── net/              # Intel e1000 Gigabit NIC network driver
+│       │   ├── storage/          # Block storage (ATA/IDE PIO & NVMe drivers)
+│       │   └── virtio/           # VirtIO block and network device drivers
 │       ├── fs/
 │       │   ├── block.rs          # BlockDevice trait & device registry
 │       │   ├── inode.rs          # INode and INodeType definitions
 │       │   ├── file.rs           # FileHandle and DirectoryEntry
 │       │   ├── path.rs           # Path normalization & lookup
 │       │   ├── vfs.rs            # Virtual File System mount table & operations
-│       │   └── fat32/            # FAT32 driver (BPB, cluster chains, directory parser)
+│       │   ├── fat32/            # FAT32 driver (BPB, cluster chains, directory parser)
+│       │   ├── devfs.rs          # Linux character & block device filesystem (/dev)
+│       │   ├── procfs.rs         # Linux process & system info filesystem (/proc)
+│       │   └── sysfs.rs          # Linux kernel subsystem filesystem (/sys)
 │       ├── task/
 │       │   ├── thread.rs         # ThreadControlBlock & ThreadState
-│       │   ├── process.rs        # ProcessControlBlock
+│       │   ├── process.rs        # ProcessControlBlock with Linux credentials & file table
 │       │   ├── switch.rs         # Assembly context switch (context_switch)
 │       │   ├── scheduler.rs      # Priority round-robin scheduler & timers
+│       │   ├── pipe.rs           # IPC stream pipes & circular buffers
+│       │   ├── elf.rs            # ELF64 binary parser & dynamic interpreter loader
 │       │   └── user.rs           # Ring 3 user mode entry via iretq
 │       ├── sync/                 # Mutex, Semaphore, WaitQueue primitives
-│       ├── syscall/              # POSIX-compatible syscall dispatcher
-│       └── subsystems/nt/        # [Windows NT Subsystem]
-│           ├── types.rs          # NT types (NTSTATUS, DRIVER_OBJECT, IRP, UNICODE_STRING)
-│           ├── pe.rs             # PE32+ parser, section mapper, relocator, IAT resolver
-│           ├── ntoskrnl.rs       # ntoskrnl.exe DDI shims (ExAllocatePoolWithTag, IoCreateDevice, DbgPrint)
-│           ├── hal.rs            # hal.dll DDI shims (READ_PORT_*, WRITE_PORT_*)
-│           └── mod.rs            # NT subsystem initialization & live WDM driver demo
+│       ├── net/                  # TCP/IP network stack (Ethernet, ARP, IPv4, ICMP, Sockets)
+│       └── syscall/              # POSIX/Linux standard x86_64 syscall dispatcher & Unix sockets
 │
 └── xtask/                        # [Crate: xtask] (Build & Run Orchestrator)
     ├── Cargo.toml
     └── src/
-        └── main.rs               # Builds bootloader, kernel, creates FAT32 image, runs QEMU
+        └── main.rs               # Builds bootloader, kernel, creates FAT32 image, generates VMDK/VDI
 ```
 
 ---
@@ -135,9 +137,9 @@ When working on this codebase, adhere to the following rules:
 - Handlers in [`kernel/src/arch/x86_64/idt.rs`](file:///d:/REPOSITORIES/Lunix/kernel/src/arch/x86_64/idt.rs) use direct lockless UART port I/O (`write_str`, `write_hex`, `write_dec`).
 - **Never** acquire locks or allocate heap inside fatal CPU exception handlers to prevent deadlock during fault logging.
 
-### E. Windows NT Driver Calling Convention
-- All Windows NT DDI exports and callbacks MUST be declared as `unsafe extern "win64" fn(...)`.
-- Rust natively supports `win64` ABI on `x86_64`, passing arguments in `RCX, RDX, R8, R9` and returning values in `RAX`.
+### E. Standard Linux Syscall ABI
+- Linux x86_64 system calls receive arguments in `RDI, RSI, RDX, R10, R8, R9` with syscall number in `RAX`, returning results in `RAX`.
+- Error codes are returned as negative errno values (e.g. `-ENOENT = -2`, `-EBADF = -9`, `-ECHILD = -10`, `-EAGAIN = -11`, `-EFAULT = -14`, `-EINVAL = -22`, `-EMFILE = -24`, `-ENOSYS = -38`).
 
 ---
 
@@ -406,18 +408,102 @@ The kernel boots into an interactive graphical console with an IBM VGA font disp
   - Added `fs_base` tracking to `ThreadControlBlock` (`Thread`).
   - Extended scheduler context switch in `Scheduler::schedule()` to read `old_thread.fs_base = rdmsr(0xC000_0100)` and write `wrmsr(0xC000_0100, next_fs_base)`.
   - Integrated `set_current_thread_fs_base` into `sys_arch_prctl` and `exec_elf_replace` for instant synchronization with glibc/musl `pthread_t` runtime structures.
-- **PID 1 `/sbin/init` & `/etc/init.d/rcS` Userspace Bootstrapper**:
-  - Added kernel `tinycore` command and automated test orchestrator bootstrapping PID 1 `/sbin/init`.
-  - Parses `/etc/inittab`, executes `/etc/init.d/rcS` sysinit scripts, mounts `/proc`, `/sys`, `/dev` via `/bin/mount`, and gracefully drops to shell upon completion.
-  - Implemented `sys_wait4` status reaping with correct `wstatus` formatting (`WEXITSTATUS`), unblocking parent processes upon child exit.
-- **Full Compatibility Suite**:
-  - Linux dynamic ELF binaries with GNU Glibc 2.38 (`/lib/ld-linux-x86-64.so.2`, `libc.so.6`).
-  - BusyBox multi-call userspace tools.
-  - Windows NT Win32 PE32+ executables (`kernel32.dll`, Win32 Environment Block, In-Memory Registry, Named Pipes, Directory Find API).
-  - 100% automated verification passing across all Linux and Windows test binaries.
+### Phase 20: Milestone 8 — Authentic Tiny Core Linux Graphical Desktop Environment (Xfbdev + flwm + wbar + aterm + FLTK Apps)
+- **Official Upstream TCZ Package Ingestion (33 Extensions)**:
+  - Ingests all 33 official `.tcz` packages from `TinyCorePure64.iso` (~686 files, 43.5 MB) directly into `/usr/local/` and `/home/tc/` on the 268 MiB FAT32 root disk image (`target/lunix.img`).
+  - Packages include: `Xfbdev.tcz` (X11 Framebuffer Server), `flwm.tcz` (Fast Light Window Manager), `wbar.tcz` (Animated Icon Dock), `aterm.tcz` (Terminal Emulator), `fltk-1.3.tcz` (C++ GUI Widget Toolkit), `Xprogs.tcz` (Control Panel `cpanel`, Editor `editor`, Mount Tool `mnttool`, Mouse Tool `mousetool`), `Xlibs.tcz`, `libX11.tcz`, `imlib2.tcz`, `freetype.tcz`, `libpng.tcz`, `libXfont.tcz`, `hsetroot.tcz`.
+- **UNIX Domain Socket Subsystem (`AF_UNIX` / `AF_LOCAL`)**:
+  - Implemented `UnixSocket` and global `UNIX_SOCKET_REGISTRY` in `kernel/src/syscall/unix_socket.rs`.
+  - Supports `sys_socket` (`AF_UNIX`, `SOCK_STREAM`), `sys_bind` (`/tmp/.X11-unix/X0`), `sys_listen`, `sys_connect`, `sys_accept`, `sys_getsockname`, `sys_getpeername`.
+  - Bidirectional in-memory stream IPC using circular `PipeBuffer` queues for high-throughput X11 client/server event loops between `Xfbdev` and clients (`flwm`, `wbar`, `aterm`, `cpanel`, `editor`).
+  - Integrated with `sys_poll` and `sys_select` for event readiness (`POLLIN`, `POLLOUT`).
+- **Linux Framebuffer (`/dev/fb0`) & Input Streaming**:
+  - Direct GOP physical MMIO page mapping via `sys_mmap` on `/dev/fb0`.
+  - Framebuffer control ioctls: `FBIOGET_VSCREENINFO`, `FBIOPUT_VSCREENINFO`, `FBIOGET_FSCREENINFO`.
+  - PS/2 3-byte mouse packet streaming on `/dev/input/mice` and `/dev/input/event0`.
+  - Terminal stream and keyboard handling on `/dev/tty0`..`/dev/tty2` and `/dev/console`.
+- **Desktop Environment Startup & Sessions**:
+  - Configured `/etc/sysconfig/` (`Xserver` -> `Xfbdev`, `desktop` -> `flwm`, `icons` -> `wbar`, `tcuser` -> `tc`, `tcedir` -> `/tce`).
+  - Created `/home/tc/.xsession` launching `Xfbdev -br -screen 1024x768x32 -mouse /dev/input/mice,3`, `flwm`, `wbar -bpress -pos bottom -zoomf 2 -isize 32`, and `aterm -geometry 80x24+50+50`.
+  - Created `/home/tc/.wbar`, `/home/tc/.setbackground`, `/home/tc/.profile`, `/etc/ld.so.conf`, and verified `/tmp/.X11-unix/`.
+  - Shell commands `startx` and `desktop` automatically launch the authentic Tiny Core Linux Graphical Desktop.
+- **Automated Verification**:
+  - `tests/test_tinycore_gui.py` verified 100% (19/19 checks passed).
+  - `tests/test_tinycore_upstream.py` verified 100% (19/19 checks passed).
+
+### Phase 21: Arch Linux Distribution & Pacman Package Management Runtime
+- **Arch Linux Distro Architecture**:
+  - Configured full standard Arch Linux system environment: `/etc/os-release` (`NAME="Arch Linux"`, `ID=arch`), `/etc/arch-release`, `/etc/pacman.conf`, `/etc/pacman.d/mirrorlist`, `/etc/issue`, `/etc/hostname` (`archlinux`), `/etc/profile`, `/etc/shells`, `/etc/shadow`, `/etc/passwd` (`root` and `arch`), `/root/.bashrc`, `/home/arch/.bashrc`.
+- **Pacman Package Management Subsystem**:
+  - `pacman` binary at `/usr/bin/pacman` and `/bin/pacman` (and standalone ELF `/bin/test_pacman.elf`).
+  - Full support for `pacman -V` (Version & banner), `pacman -Q` (Query installed packages), `pacman -Sy` (Sync repository databases), `pacman -S <pkg>` (Package installation transaction).
+  - Pre-populated `/var/lib/pacman/local/` package records: `linux-lunix-6.8.0-1`, `filesystem-2024.01.19-1`, `glibc-2.39-1`, `bash-5.2.037-1`, `pacman-6.1.0-3`, `coreutils-9.5-1`, `systemd-255.7-1`, `iproute2-6.9.0-1`, `archlinux-keyring-20240901-1`, `pacman-mirrorlist-20240901-1`, `e1000-driver-1.0.0-1`, `base-3-2`.
+- **Arch Linux Interactive Shell & Tools**:
+  - Arch Linux prompt `[root@arch {cwd}]# ` with live working directory tracking.
+  - Native `neofetch` / `fastfetch` displaying official Arch Linux ASCII logo and specs.
+  - `arch` / `bash` GNU bash environment launcher.
+- **Automated Verification**:
+  - `tests/test_arch_linux.py` verified 100% (18/18 checks passed).
+
+### Phase 22: (Removed) Kernel-Drawn Desktop
+- An earlier agent drew a fake Windows-style desktop (taskbar, Start menu, mock Pacman/Terminal windows) inside the kernel (`display/desktop.rs`, `compositor.rs`, `window.rs`). It was **deleted**: it violated the Ring 0 / Ring 3 separation in section 7. `display/` now only holds the early-boot text console (`console.rs`, `framebuffer.rs`, `font.rs`).
+- The graphical desktop must come from real upstream X11 binaries in userspace (see Phase 23), never from kernel code.
+
+### Phase 23: Official Arch Linux Window Managers & Package Ingestion (JWM + Openbox + Tint2 + Xorg + Xterm + Pacman libalpm)
+- **Official Upstream Arch Linux Package Ingestion**:
+  - Downloaded and extracted official Arch Linux `.pkg.tar.zst` packages directly from upstream Arch Linux mirrors (`geo.mirror.pkgbuild.com`):
+    - `jwm-2.4.6-2-x86_64` (`/usr/bin/jwm`, `/etc/system.jwmrc`)
+    - `openbox-3.6.1-14-x86_64` (`/usr/bin/openbox`, `/usr/lib/libobrender.so`, `/usr/lib/libobt.so`, themes)
+    - `tint2-17.1.3-1-x86_64` (`/usr/bin/tint2`, `/etc/xdg/tint2/tint2rc`)
+    - `xorg-server-21.1.24-1-x86_64` (`/usr/bin/Xorg`, `/usr/bin/X`, `/usr/lib/xorg/modules/`)
+    - `xorg-xinit-1.4.4-1-x86_64` (`/usr/bin/startx`, `/usr/bin/xinit`, `/etc/X11/xinit/xinitrc`)
+    - `xorg-twm-1.0.12-2-x86_64` (`/usr/bin/twm`, `/usr/share/X11/twm/system.twmrc`)
+    - `xterm-411-1-x86_64` (`/usr/bin/xterm`, `/usr/bin/uxterm`)
+    - `pacman-6.1.0-3-x86_64` (`/usr/bin/pacman`, `/usr/lib/libalpm.so.16`)
+    - `glibc-2.39-1-x86_64` (`/lib/libc.so.6`, `/lib64/ld-linux-x86-64.so.2`)
+    - Supporting dynamic X11 libraries: `cairo`, `pango`, `librsvg`, `libxinerama`, `libxrandr`, `libxft`, `libxpm`, `libarchive`, `imlib2`, `libxcursor`, `libxcomposite`, `libxdamage`, `startup-notification`.
+  - Ingested 2,362 official Arch Linux files into the 1024 MiB (1 GiB) FAT32 bootable root disk image (`target/lunix.img`).
+- **Complete Shared Library Mirroring**:
+  - Dynamically mirrors all `.so` shared libraries across `/lib`, `/usr/lib`, `/lib64`, `/usr/lib64`, and `/usr/local/lib` for transparent dynamic linking across upstream X11 applications.
+- **Official JWM & Xinit Session Configuration**:
+  - `/etc/system.jwmrc` and `/root/.jwmrc`: Windows-style bottom `<Tray>` panel with `[A] Start` button, `<TaskList>`, `<Dock>`, `<Clock>`, and `<RootMenu>`.
+  - `/etc/X11/xinit/xinitrc` and `/root/.xinitrc`: Starts Framebuffer X Server on `/dev/fb0` and launches `jwm` or `openbox`.
+- **Automated Verification**:
+  - `tests/test_arch_gui.py` verified 100% (7/7 checks passed).
+  - `tests/test_arch_linux.py` verified 100% (18/18 checks passed).
+
+---
+
+### Phase 24: Real Userspace Bring-Up (Arch `bash` as PID 1, TTY line discipline)
+- **Boot flow**: `kmain` no longer runs a fake shell. `task::start_init()` execs the first of `/usr/bin/bash`, `/bin/bash`, `/sbin/init`, `/usr/lib/systemd/systemd`, `/bin/sh` as PID 1 (real Arch `systemd` needs far more kernel surface; bash is the `init=/bin/bash` bring-up step). If none exists, or PID 1 exits, the kernel debug console (old built-in shell, prompt `lunix-debug:/# `) takes over. The built-in shell has no fake `pacman`/`neofetch`/`startx` any more; unknown commands exec real binaries.
+- **TTY** (`drivers/tty.rs`): real line discipline (`ICANON`/`ECHO`/`ISIG`, erase, `^D`), real `struct termios` via `TCGETS`/`TCSETS*` **and `TCGETS2`/`TCSETS2*`** (glibc >= 2.42 `tcgetattr` uses the `*2` ioctls; without them bash silently thinks it has no terminal), `TIOCGPGRP`/`TIOCSPGRP`/`TIOCGSID`/`TIOCSCTTY`, `FIONREAD`. Blocking `read` on fd 0 and `/dev/tty*`; `poll`/`select` report real readiness. Unknown ioctls now return `-ENOTTY` (they used to return 0, which hid bugs).
+- **Syscalls added/fixed**: `statx` (332), `prctl` (157), `time` (201), `faccessat2` (439), `pselect6` (270), `ppoll` (271), real `select` (23; was a stub returning 0), `setfsuid/setfsgid/fadvise64` stubs. `poll` now honours `timeout=-1` and long timeouts (it used to return immediately). Unimplemented syscalls return `-ENOSYS` (was `-1` = `-EPERM`, which stops glibc falling back). `fstat` reports correct file types (FIFO/socket/char/block) instead of "regular file" for everything.
+- **FAT32** `Fat32File::read` streams from the cluster chain (it used to load the whole file, twice, into the heap: libicudata is 30 MB). User stack is 2 MiB (was 64 KiB); kernel heap is 64 MiB. The initial environment now includes `DISPLAY=:0` and `LD_LIBRARY_PATH`.
+- **Image builder (xtask)** must **never plant stand-in binaries** for Arch programs. The hand-assembled fake `bash`/`sh`/`busybox`/`pacman`/`init`/`ld-linux` generators were deleted. Tiny Core ingestion is opt-in (`LUNIX_TINYCORE=1`). Real Arch `usr/bin` programs are mirrored to `/bin`, `/sbin`, `/usr/sbin` (FAT32 has no symlinks). Image is 2 GiB.
+- **Package fetching**: `tools/resolve_arch_deps.py [--fetch] <pkgs...>` resolves the full dependency closure from the Arch repo DBs (like `pacman -S`) and extracts into `target/arch_rootfs_overlay/<pkg>/`. The old `fetch_arch_packages.py` fetched a fixed list with no dependencies, so real `bash` (needs `libreadline`) and `ls` (needs `libcap`) could not even start. Base closure: `bash coreutils pacman filesystem`.
+- **Verbose tracing** (every syscall, ELF load) is compiled out; build the kernel with `--features strace` to enable it. It floods the serial port badly enough to drop typed input.
+- **Verified in QEMU** (serial stdio): real `bash` 5.3 prompt and line editing, real `ls`/`cat`/`uname`/`head` with pipes, real `pacman -V` (libalpm 16.0.1 via the real glibc 2.44 `ld.so`).
+- **Known gaps**: no signal delivery (`^C` only clears the line), no per-process process groups/sessions (pgrp = pid), stdin characters can be dropped right after a heavy process exits (serial RX under load), no RTC (`time` is uptime), FAT32 is read-only and has no symlinks/permissions (a real Linux fs such as ext4 is the proper fix), `xtask` still writes hand-authored `/etc` files and a synthetic `/var/lib/pacman/local` database, Arch `systemd` and the X11 stack (Xorg/JWM/Openbox/tint2 on `/dev/fb0`) have not been run yet, and `tests/test_*gui*.py` / older milestone tests still expect the removed mock UI and fake binaries.
+
+### Phase 25: Real Arch Desktop Running (Xorg + JWM + xterm via `startx`)
+- **Status**: boots to real Arch `bash` as PID 1; typing `startx` (real `xinit`) starts real Xorg (fbdev on `/dev/fb0`, evdev keyboard/mouse), JWM with its taskbar/clock, and an xterm running real bash on a PTY. Verified in QEMU with a screenshot.
+- **Root filesystem**: GPT disk, FAT32 ESP at `/boot`, ext2 root (`xtask/src/ext2.rs` writer, `kernel/src/fs/ext2.rs` reader, symlinks supported). Packages are read straight from `.pkg.tar` archives (never extracted on Windows: case collisions/symlink loss).
+- **Kernel features added**: demand paging (`mm/vma.rs`), COW fork (`mm/cow.rs`), real threads + futex + epoll/eventfd, PTYs, evdev, `/sys/class/graphics/fb0`, per-thread FPU state, user-fault-kills-process (`fatal_or_kill_user`), default-terminate `kill`/`tkill`/`tgkill` (no user signal handlers yet), `AF_NETLINK` and other unsupported socket domains return `-EAFNOSUPPORT` (glibc `getifaddrs` in xinit needs this), `utimensat`/`alarm`/`clock_getres`/`setpriority` accepted.
+- **Serial input**: send `
+` (not ``) as Enter when driving the console from a script.
+- **Known gaps**: no user-space signal handlers/`rt_sigreturn` delivery, no `/proc/self/fd`, ext2 is read-only (created files live in memory), no systemd PID 1, time is uptime-based, `timerfd`/`signalfd`/`clone3` unimplemented, page tables leak (~130 KB per exec), `xsetroot` is not in the package set (root window stays grey), stale `tests/test_*gui*.py` and milestone tests.
 
 
+## 7. Master Architectural Separation & AI Handover Reference
 
-
-
-
+### Non-Negotiable Invariants for Agents:
+1. **Ring 0 (The Kernel)**:
+   - Must strictly implement Linux kernel facilities (`torvalds/linux` x86_64 architecture).
+   - **Never draw mock GUI application windows, synthetic desktops, or fake text dashboards in kernel Rust code.**
+   - Framebuffer output in kernel mode is strictly for early boot text console (`/dev/tty0`).
+2. **Ring 3 (The Userspace OS)**:
+   - Must run **real compiled upstream Arch Linux ELF binaries** (`Xfbdev`, `Xorg`, `jwm`, `openbox`, `tint2`, `xterm`, `bash`, `pacman`).
+   - The desktop environment and window management are handled exclusively by upstream X11 binaries communicating via `/tmp/.X11-unix/X0` and `/dev/fb0`.
+3. **Full Technical Handover Blueprint**:
+   - Refer to [`docs/FULL_PROJECT_HANDOVER_REPORT.md`](file:///d:/REPOSITORIES/Lunix/docs/FULL_PROJECT_HANDOVER_REPORT.md) for the complete subsystem checklist, syscall table, build commands, and next implementation steps.
+   - Refer to [`docs/KERNEL_ROADMAP.md`](file:///d:/REPOSITORIES/Lunix/docs/KERNEL_ROADMAP.md) for the current phased plan (boot-time fixes, POSIX completeness, filesystem, distro breadth, reliability) and for the parked "hybrid Windows+Linux kernel" ambition. Read it before picking the next task.

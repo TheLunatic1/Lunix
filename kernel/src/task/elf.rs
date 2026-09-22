@@ -1,7 +1,7 @@
 use x86_64::structures::paging::PageTableFlags;
 use x86_64::VirtAddr;
 use alloc::string::String;
-use crate::lunix_println;
+
 use spin::Mutex;
 
 #[repr(C)]
@@ -43,8 +43,11 @@ pub const PT_NOTE: u32 = 4;
 pub const PT_PHDR: u32 = 6;
 pub const PT_TLS: u32 = 7;
 
-pub const USER_STACK_BASE: u64 = 0x0000_7FFF_2000_0000;
-pub const USER_STACK_SIZE: usize = 64 * 1024; // 64 KiB
+// The stack is mapped eagerly (no demand growth yet), so it must be big enough for real
+// programs: 2 MiB, ending at the same top address as before.
+pub const USER_STACK_SIZE: usize = 2 * 1024 * 1024;
+pub const USER_STACK_TOP: u64 = 0x0000_7FFF_2001_0000;
+pub const USER_STACK_BASE: u64 = USER_STACK_TOP - USER_STACK_SIZE as u64;
 pub const INTERP_LOAD_BASE: u64 = 0x0000_7FFF_E000_0000;
 
 #[derive(Debug, Clone, Copy)]
@@ -56,7 +59,7 @@ pub struct LoadedProgram {
 static CURRENT_ELF_EXEC: Mutex<Option<LoadedProgram>> = Mutex::new(None);
 
 pub fn load_elf(elf_bytes: &[u8]) -> Result<LoadedProgram, &'static str> {
-    let (prog, _pml4) = load_elf_with_args(elf_bytes, &["prog"], 1)?;
+    let (prog, _pml4) = load_elf_with_args(elf_bytes, &["prog"], None, 1)?;
     Ok(prog)
 }
 
@@ -120,6 +123,7 @@ fn map_and_load_segment(
 pub fn load_elf_with_args(
     elf_bytes: &[u8],
     args: &[&str],
+    envp: Option<&[&str]>,
     pid: usize,
 ) -> Result<(LoadedProgram, x86_64::structures::paging::PhysFrame<x86_64::structures::paging::Size4KiB>), &'static str> {
     if elf_bytes.len() < core::mem::size_of::<Elf64Header>() {
@@ -138,7 +142,7 @@ pub fn load_elf_with_args(
         return Err("Not a 64-bit x86_64 ELF binary");
     }
 
-    lunix_serial_println!("  [ELF64] Valid ELF found (PID {}). Entry: 0x{:X}, PhNum: {}, Type: {}", pid, header.entry, header.phnum, header.elf_type);
+    lunix_strace!("  [ELF64] Valid ELF found (PID {}). Entry: 0x{:X}, PhNum: {}, Type: {}", pid, header.entry, header.phnum, header.elf_type);
 
     let proc_pml4_frame = crate::mm::vmm::create_process_pml4()?;
     let pml4_phys = proc_pml4_frame.start_address();
@@ -182,7 +186,7 @@ pub fn load_elf_with_args(
             let memsz = phdr.p_memsz as usize;
             let filesz = phdr.p_filesz as usize;
 
-            lunix_serial_println!("  [ELF64] PT_LOAD: VAddr=0x{:X}, FileSz={}, MemSz={}", vaddr, filesz, memsz);
+            lunix_strace!("  [ELF64] PT_LOAD: VAddr=0x{:X}, FileSz={}, MemSz={}", vaddr, filesz, memsz);
 
             let src_start = phdr.p_offset as usize;
             let src_end = src_start + filesz;
@@ -205,7 +209,7 @@ pub fn load_elf_with_args(
             .unwrap_or("")
             .trim_matches('\0');
         
-        lunix_serial_println!("  [ELF64] Binary requires dynamic interpreter: '{}'", raw_path);
+        lunix_strace!("  [ELF64] Binary requires dynamic interpreter: '{}'", raw_path);
 
         if let Ok(interp_bytes) = crate::fs::vfs::read_to_vec(raw_path) {
             if interp_bytes.len() >= core::mem::size_of::<Elf64Header>() {
@@ -237,19 +241,23 @@ pub fn load_elf_with_args(
                     }
 
                     execution_entry = interp_base + interp_header.entry;
-                    lunix_serial_println!("  [ELF64] Dynamic interpreter mapped at 0x{:X}, entry: 0x{:X}", interp_base, execution_entry);
+                    lunix_strace!("  [ELF64] Dynamic interpreter mapped at 0x{:X}, entry: 0x{:X}", interp_base, execution_entry);
                 }
             }
         } else {
-            lunix_serial_println!("  [ELF64] Warning: dynamic interpreter '{}' not found on VFS, falling back to static entry", raw_path);
+            lunix_strace!("  [ELF64] Warning: dynamic interpreter '{}' not found on VFS, falling back to static entry", raw_path);
         }
     }
 
     // Allocate and map isolated User Stack (64 KiB)
     let user_stack_base = USER_STACK_BASE;
     let num_stack_pages = USER_STACK_SIZE / 4096;
-    let mut stack_top_frame = 0u64;
-    for p in 0..num_stack_pages {
+    // Only the top of the stack (where argv/envp/auxv live and the program starts) is mapped
+    // now; the rest of the 2 MiB is demand-zero memory that costs nothing until touched.
+    const EAGER_STACK_PAGES: usize = 16;
+    let lazy_pages = num_stack_pages - EAGER_STACK_PAGES;
+    crate::mm::vma::map_in(pml4_phys.as_u64(), user_stack_base, (lazy_pages * 4096) as u64, None);
+    for p in lazy_pages..num_stack_pages {
         let page_vaddr = VirtAddr::new(user_stack_base + (p * 4096) as u64);
         let phys_frame = crate::mm::pmm::alloc_frame().ok_or("Out of memory for user stack")?;
         unsafe {
@@ -261,120 +269,104 @@ pub fn load_elf_with_args(
             | PageTableFlags::USER_ACCESSIBLE;
 
         crate::mm::vmm::map_page_in_pml4(pml4_phys, page_vaddr, phys_frame, flags)?;
-        if p == num_stack_pages - 1 {
-            stack_top_frame = phys_frame.as_u64();
-        }
     }
 
-    let user_stack_top = user_stack_base + (USER_STACK_SIZE as u64) - 2048;
+    // ---- Initial process stack (System V AMD64 ABI) ----
+    // Built as one image in kernel memory, then copied to the top of the user stack:
+    //   sp -> argc | argv[0..argc] NULL | envp[..] NULL | auxv pairs ... AT_NULL | padding | strings
+    let stack_end = user_stack_base + USER_STACK_SIZE as u64;
 
-    // Set up standard Linux System V AMD64 initial user stack frame:
-    unsafe {
-        let string_base = (stack_top_frame + 4096 - 1024) as *mut u8;
-        let stack_ptr = (stack_top_frame + 4096 - 2048) as *mut u64;
-        let virt_string_base = user_stack_base + (USER_STACK_SIZE as u64) - 1024;
+    let default_env: [&str; 8] = [
+        "PATH=/usr/local/bin:/bin:/usr/bin:/sbin:/usr/sbin",
+        "HOME=/root",
+        "USER=root",
+        "LOGNAME=root",
+        "TERM=linux",
+        "SHELL=/bin/bash",
+        "PWD=/",
+        "LD_LIBRARY_PATH=/usr/local/lib:/usr/lib:/lib:/lib64:/usr/lib64",
+    ];
+    let env: &[&str] = envp.unwrap_or(&default_env);
 
-        let mut str_offset = 0usize;
-        let mut argv_addrs = [0u64; 16];
-
-        for (i, &arg) in args.iter().enumerate() {
-            if i < 16 && str_offset + arg.len() + 1 <= 512 {
-                let dst = string_base.add(str_offset);
-                core::ptr::copy_nonoverlapping(arg.as_ptr(), dst, arg.len());
-                *dst.add(arg.len()) = 0;
-                let virt_arg = virt_string_base + str_offset as u64;
-                argv_addrs[i] = virt_arg;
-                str_offset += arg.len() + 1;
-            }
-        }
-
-        // Environment variables
-        let default_envs: &[&[u8]] = &[
-            b"PATH=/bin:/usr/bin:/sbin:/usr/sbin\0",
-            b"HOME=/home/tc\0",
-            b"USER=tc\0",
-            b"LOGNAME=tc\0",
-            b"TERM=linux\0",
-            b"SHELL=/bin/sh\0",
-            b"PWD=/\0",
-        ];
-        let mut env_addrs = [0u64; 8];
-        let mut env_count = 0;
-
-        for (i, &env_bytes) in default_envs.iter().enumerate() {
-            if i < 8 && str_offset + env_bytes.len() <= 900 {
-                let dst = string_base.add(str_offset);
-                core::ptr::copy_nonoverlapping(env_bytes.as_ptr(), dst, env_bytes.len());
-                let virt_env = virt_string_base + str_offset as u64;
-                env_addrs[i] = virt_env;
-                str_offset += env_bytes.len();
-                env_count += 1;
-            }
-        }
-
-        // 16 random bytes for AT_RANDOM
-        let random_ptr_offset = str_offset;
-        let random_dst = string_base.add(random_ptr_offset);
-        for k in 0..16 {
-            *random_dst.add(k) = (0x5A ^ (k as u8)).wrapping_add(0x13);
-        }
-        let virt_random_ptr = virt_string_base + random_ptr_offset as u64;
-
-        let argc = args.len().min(16);
-        let mut idx = 0;
-
-        // 1. argc
-        *stack_ptr.add(idx) = argc as u64;
-        idx += 1;
-
-        // 2. argv[0..argc] + NULL
-        for i in 0..argc {
-            *stack_ptr.add(idx) = argv_addrs[i];
-            idx += 1;
-        }
-        *stack_ptr.add(idx) = 0; // NULL
-        idx += 1;
-
-        // 3. envp[0..env_count] + NULL
-        for i in 0..env_count {
-            *stack_ptr.add(idx) = env_addrs[i];
-            idx += 1;
-        }
-        *stack_ptr.add(idx) = 0; // NULL
-        idx += 1;
-
-        // 4. Auxiliary Vectors (auxv)
-        let phdr_vaddr = main_base + if header.phoff < 0x400000 && main_base == 0 {
-            0x400000 + header.phoff
-        } else {
-            header.phoff
-        };
-
-        let auxv: &[(u64, u64)] = &[
-            (3, phdr_vaddr),                 // AT_PHDR
-            (4, header.phentsize as u64),    // AT_PHENT
-            (5, header.phnum as u64),        // AT_PHNUM
-            (6, 4096),                       // AT_PAGESZ
-            (7, interp_base),                // AT_BASE (Dynamic interpreter base)
-            (8, 0),                          // AT_FLAGS
-            (9, main_base + header.entry),   // AT_ENTRY (Application main entry point)
-            (11, 0),                         // AT_UID
-            (12, 0),                         // AT_EUID
-            (13, 0),                         // AT_GID
-            (14, 0),                         // AT_EGID
-            (17, 100),                       // AT_CLKTCK
-            (25, virt_random_ptr),           // AT_RANDOM
-            (31, argv_addrs[0]),             // AT_EXECFN
-            (33, 0),                         // AT_SYSINFO_EHDR
-            (0, 0),                          // AT_NULL
-        ];
-
-        for &(a_type, a_val) in auxv {
-            *stack_ptr.add(idx) = a_type;
-            *stack_ptr.add(idx + 1) = a_val;
-            idx += 2;
-        }
+    // String block: AT_RANDOM bytes, AT_EXECFN, argv strings, envp strings.
+    let mut strings: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+    let mut random = [0u8; 16];
+    for (k, b) in random.iter_mut().enumerate() {
+        *b = (0x5A ^ (k as u8)).wrapping_add(0x13);
     }
+    strings.extend_from_slice(&random);
+    let add_string = |strings: &mut alloc::vec::Vec<u8>, s: &str| -> usize {
+        let off = strings.len();
+        strings.extend_from_slice(s.as_bytes());
+        strings.push(0);
+        off
+    };
+    let execfn_off = add_string(&mut strings, args.first().copied().unwrap_or(""));
+    let argv_offs: alloc::vec::Vec<usize> = args.iter().map(|a| add_string(&mut strings, a)).collect();
+    let env_offs: alloc::vec::Vec<usize> = env.iter().map(|e| add_string(&mut strings, e)).collect();
+    let strings_size = (strings.len() + 15) & !15;
+    let strings_start = stack_end - strings_size as u64;
+
+    let phdr_vaddr = main_base
+        + if header.phoff < 0x400000 && main_base == 0 { 0x400000 + header.phoff } else { header.phoff };
+    let auxv: [(u64, u64); 16] = [
+        (3, phdr_vaddr),                             // AT_PHDR
+        (4, header.phentsize as u64),                // AT_PHENT
+        (5, header.phnum as u64),                    // AT_PHNUM
+        (6, 4096),                                   // AT_PAGESZ
+        (7, interp_base),                            // AT_BASE (dynamic interpreter)
+        (8, 0),                                      // AT_FLAGS
+        (9, main_base + header.entry),               // AT_ENTRY
+        (11, 0),                                     // AT_UID
+        (12, 0),                                     // AT_EUID
+        (13, 0),                                     // AT_GID
+        (14, 0),                                     // AT_EGID
+        (17, 100),                                   // AT_CLKTCK
+        (25, strings_start),                         // AT_RANDOM (first 16 bytes of the block)
+        (31, strings_start + execfn_off as u64),     // AT_EXECFN
+        (33, 0),                                     // AT_SYSINFO_EHDR
+        (0, 0),                                      // AT_NULL
+    ];
+
+    let words = 1 + (args.len() + 1) + (env.len() + 1) + auxv.len() * 2;
+    let sp = (strings_start - (words * 8) as u64) & !0xF;
+    let eager_bytes = (EAGER_STACK_PAGES * 4096) as u64;
+    if stack_end - sp > eager_bytes - 4096 {
+        return Err("Argument list too long");
+    }
+
+    let mut image: alloc::vec::Vec<u64> = alloc::vec::Vec::with_capacity(words);
+    image.push(args.len() as u64);
+    image.extend(argv_offs.iter().map(|&o| strings_start + o as u64));
+    image.push(0);
+    image.extend(env_offs.iter().map(|&o| strings_start + o as u64));
+    image.push(0);
+    for &(t, v) in &auxv {
+        image.push(t);
+        image.push(v);
+    }
+
+    // Copy the image (pointer block, then strings) into the mapped stack pages.
+    let write_user = |vaddr: u64, bytes: &[u8]| -> Result<(), &'static str> {
+        let mut done = 0usize;
+        while done < bytes.len() {
+            let va = vaddr + done as u64;
+            let page = va & !0xFFF;
+            let phys = crate::mm::vmm::get_page_phys_in_pml4(pml4_phys, VirtAddr::new(page))
+                .ok_or("Initial stack page is not mapped")?;
+            let off = (va - page) as usize;
+            let n = (4096 - off).min(bytes.len() - done);
+            unsafe {
+                core::ptr::copy_nonoverlapping(bytes.as_ptr().add(done), (phys.as_u64() + off as u64) as *mut u8, n);
+            }
+            done += n;
+        }
+        Ok(())
+    };
+    let image_bytes: alloc::vec::Vec<u8> = image.iter().flat_map(|w| w.to_le_bytes()).collect();
+    write_user(sp, &image_bytes)?;
+    write_user(strings_start, &strings)?;
+    let user_stack_top = sp;
 
     Ok((
         LoadedProgram {
@@ -392,7 +384,7 @@ fn elf_runner_trampoline() {
         lock.get(&tid).copied().expect("No ELF program loaded for current thread")
     };
 
-    lunix_println!("  [USER] Transitioning CPU to Ring 3 at entry point 0x{:X}, stack 0x{:X}...", prog.entry_point, prog.user_stack_top);
+    lunix_strace!("  [USER] Transitioning CPU to Ring 3 at entry point 0x{:X}, stack 0x{:X}...", prog.entry_point, prog.user_stack_top);
     unsafe {
         crate::task::user::enter_user_mode(prog.entry_point, prog.user_stack_top);
     }
@@ -403,7 +395,7 @@ pub fn exec_elf(path: &str) -> Result<usize, String> {
 }
 
 pub fn exec_elf_with_args(path: &str, args: &[&str]) -> Result<usize, String> {
-    lunix_println!("[ELF] Loading binary '{}' from VFS...", path);
+    lunix_strace!("[ELF] Loading binary '{}' from VFS...", path);
     let bytes = crate::fs::vfs::read_to_vec(path)
         .map_err(|e| alloc::format!("Failed to read '{}': {:?}", path, e))?;
 
@@ -414,14 +406,14 @@ pub fn exec_elf_with_args(path: &str, args: &[&str]) -> Result<usize, String> {
         }
         let shebang_line = core::str::from_utf8(&bytes[2..line_end]).unwrap_or("/bin/sh").trim();
         let interp = shebang_line.split_whitespace().next().unwrap_or("/bin/sh");
-        lunix_println!("  [SHEBANG] Executing script '{}' via interpreter '{}'...", path, interp);
+        lunix_strace!("  [SHEBANG] Executing script '{}' via interpreter '{}'...", path, interp);
         return exec_elf_with_args(interp, &[interp, path]);
     }
 
     let is_init = path == "/sbin/init" || args.first().map(|s| *s == "init").unwrap_or(false);
     let pid = if is_init { 1 } else { crate::task::scheduler::allocate_pid() };
 
-    let (prog, proc_pml4_frame) = load_elf_with_args(&bytes, args, pid)
+    let (prog, proc_pml4_frame) = load_elf_with_args(&bytes, args, None, pid)
         .map_err(|e| alloc::format!("ELF loader error: {}", e))?;
 
     let ppid = if is_init { 0 } else { crate::task::scheduler::current_pid() };
@@ -434,14 +426,14 @@ pub fn exec_elf_with_args(path: &str, args: &[&str]) -> Result<usize, String> {
         }
     }
 
-    lunix_println!("[+] Spawned Ring 3 ELF process (PID: {}, PPID: {})", pid, ppid);
+    lunix_strace!("[+] Spawned Ring 3 ELF process (PID: {}, PPID: {})", pid, ppid);
     let tid = crate::task::scheduler::spawn_with_pid("elf_process", pid, elf_runner_trampoline, 8);
     ELF_EXEC_MAP.lock().insert(tid, prog);
     Ok(tid)
 }
 
-pub fn exec_elf_replace(path: &str, args: &[&str]) -> Result<(), String> {
-    lunix_println!("[ELF] execve replacing image with binary '{}' from VFS...", path);
+pub fn exec_elf_replace(path: &str, args: &[&str], envp: Option<&[&str]>) -> Result<(), String> {
+    lunix_strace!("[ELF] execve replacing image with binary '{}' from VFS...", path);
     let bytes = crate::fs::vfs::read_to_vec(path)
         .map_err(|e| alloc::format!("Failed to read '{}': {:?}", path, e))?;
 
@@ -452,12 +444,12 @@ pub fn exec_elf_replace(path: &str, args: &[&str]) -> Result<(), String> {
         }
         let shebang_line = core::str::from_utf8(&bytes[2..line_end]).unwrap_or("/bin/sh").trim();
         let interp = shebang_line.split_whitespace().next().unwrap_or("/bin/sh");
-        lunix_println!("  [SHEBANG] Executing script '{}' via interpreter '{}'...", path, interp);
-        return exec_elf_replace(interp, &[interp, path]);
+        lunix_strace!("  [SHEBANG] Executing script '{}' via interpreter '{}'...", path, interp);
+        return exec_elf_replace(interp, &[interp, path], envp);
     }
 
     let current_pid = crate::task::scheduler::current_pid();
-    let (prog, proc_pml4_frame) = load_elf_with_args(&bytes, args, current_pid)
+    let (prog, proc_pml4_frame) = load_elf_with_args(&bytes, args, envp, current_pid)
         .map_err(|e| alloc::format!("ELF loader error: {}", e))?;
 
     // Update current process PML4 CR3 and wake up any waiting vfork parent
@@ -465,12 +457,25 @@ pub fn exec_elf_replace(path: &str, args: &[&str]) -> Result<(), String> {
         let mut proc = proc_arc.lock();
         proc.cr3 = proc_pml4_frame.start_address().as_u64();
         proc.name = alloc::string::String::from(path);
+        crate::arch::x86_64::fpu::reset_user_state();
+        // Descriptors marked close-on-exec do not survive into the new program (this is
+        // what lets pipe readers see EOF once the writers have exited).
+        for fd in 0..crate::task::process::MAX_FD {
+            let cloexec = proc
+                .get_fd(fd)
+                .map(|d| d.lock().flags & crate::syscall::O_CLOEXEC != 0)
+                .unwrap_or(false);
+            if cloexec {
+                proc.close_fd(fd);
+            }
+        }
         if let Some(parent_tid) = proc.vfork_waiting_parent.take() {
             crate::task::scheduler::unblock_thread(parent_tid);
         }
     }
 
     // Switch active CR3 page table to new process image
+    let old_cr3 = x86_64::registers::control::Cr3::read().0.start_address().as_u64();
     unsafe {
         x86_64::registers::control::Cr3::write(
             proc_pml4_frame,
@@ -481,7 +486,14 @@ pub fn exec_elf_replace(path: &str, args: &[&str]) -> Result<(), String> {
     }
     crate::task::scheduler::set_current_thread_fs_base(0);
 
-    lunix_println!("[+] execve image replaced successfully (PID {})! Transitioning to entry 0x{:X}...", current_pid, prog.entry_point);
+    // The old image is gone: return its memory, unless a vfork parent still runs on it.
+    if old_cr3 != 0 && old_cr3 != proc_pml4_frame.start_address().as_u64()
+        && !crate::task::scheduler::address_space_shared(old_cr3, current_pid)
+    {
+        crate::mm::vmm::free_user_frames(x86_64::PhysAddr::new(old_cr3));
+    }
+
+    lunix_strace!("[+] execve image replaced successfully (PID {})! Transitioning to entry 0x{:X}...", current_pid, prog.entry_point);
     unsafe {
         crate::task::user::enter_user_mode(prog.entry_point, prog.user_stack_top);
     }

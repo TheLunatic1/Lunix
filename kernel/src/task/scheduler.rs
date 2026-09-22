@@ -53,6 +53,8 @@ pub fn init() {
         fs_base: 0,
         entry_fn: None,
         is_user: false,
+        fpu: super::thread::FpuState::initial(),
+        clear_child_tid: 0,
     };
     sched.threads.push(main_thread);
 
@@ -102,6 +104,14 @@ pub fn current_pid() -> usize {
     } else {
         0
     }
+}
+
+/// True if another live process (a `vfork` parent) still uses address space `cr3`.
+pub fn address_space_shared(cr3: u64, except_pid: usize) -> bool {
+    PROCESS_TABLE.lock().iter().any(|(&pid, p)| {
+        pid != except_pid
+            && p.try_lock().map_or(true, |g| g.is_alive && g.cr3 == cr3)
+    })
 }
 
 pub fn set_process_exit_code(pid: usize, code: i32) {
@@ -272,7 +282,7 @@ pub fn schedule() {
         return;
     }
 
-    let (old_rsp_ptr, new_rsp, next_rsp_top, next_pid, next_fs_base) = {
+    let (old_rsp_ptr, new_rsp, next_rsp_top, next_pid, next_fs_base, old_fpu, next_fpu) = {
         let mut lock = SCHEDULER.lock();
         let sched = lock.as_mut().unwrap();
 
@@ -311,6 +321,7 @@ pub fn schedule() {
             old_thread.fs_base = crate::arch::x86_64::io::rdmsr(0xC000_0100);
         }
         let old_rsp_ptr = &mut old_thread.rsp as *mut u64;
+        let old_fpu = old_thread.fpu.0.as_mut_ptr();
 
         let next_thread = sched.threads.iter_mut().find(|t| t.id == next_tid).unwrap();
         next_thread.state = ThreadState::Running;
@@ -320,11 +331,12 @@ pub fn schedule() {
         let next_fs_base = next_thread.fs_base;
 
         let next_pid = next_thread.process_id;
+        let next_fpu = next_thread.fpu.0.as_ptr();
 
         sched.current_tid = next_tid;
         CURRENT_TID.store(next_tid, Ordering::SeqCst);
 
-        (old_rsp_ptr, new_rsp, next_rsp_top, next_pid, next_fs_base)
+        (old_rsp_ptr, new_rsp, next_rsp_top, next_pid, next_fs_base, old_fpu, next_fpu)
     };
 
     // Update TSS RSP0 and Syscall stack for user mode privilege transitions
@@ -354,9 +366,66 @@ pub fn schedule() {
         }
     }
 
+    // Floating point / SSE registers belong to the thread: save ours, load the next one's.
+    // (The kernel itself is built without SSE, so nothing has touched them in between.)
+    unsafe {
+        core::arch::asm!("fxsave64 [{}]", in(reg) old_fpu, options(nostack, preserves_flags));
+        core::arch::asm!("fxrstor64 [{}]", in(reg) next_fpu, options(nostack, preserves_flags));
+    }
+
     // Perform hardware context switch
     unsafe {
         context_switch(old_rsp_ptr, new_rsp);
+    }
+}
+
+pub fn set_thread_clear_child_tid(tid: usize, ptr: u64) {
+    if let Some(sched) = SCHEDULER.lock().as_mut() {
+        if let Some(t) = sched.threads.iter_mut().find(|t| t.id == tid) {
+            t.clear_child_tid = ptr;
+        }
+    }
+}
+
+/// Take (and clear) the current thread's clear_child_tid pointer.
+pub fn take_current_clear_child_tid() -> u64 {
+    let tid = current_tid();
+    let mut lock = SCHEDULER.lock();
+    lock.as_mut()
+        .and_then(|s| s.threads.iter_mut().find(|t| t.id == tid))
+        .map(|t| core::mem::take(&mut t.clear_child_tid))
+        .unwrap_or(0)
+}
+
+/// Number of threads of process `pid` that have not exited.
+pub fn live_thread_count(pid: usize) -> usize {
+    SCHEDULER
+        .lock()
+        .as_ref()
+        .map(|s| s.threads.iter().filter(|t| t.process_id == pid && t.state != ThreadState::Dead).count())
+        .unwrap_or(0)
+}
+
+/// `exit_group`: terminate every thread of `pid` except `keep_tid`.
+pub fn kill_other_threads(pid: usize, keep_tid: usize) {
+    if let Some(sched) = SCHEDULER.lock().as_mut() {
+        for t in sched.threads.iter_mut() {
+            if t.process_id == pid && t.id != keep_tid && pid != 0 {
+                t.state = ThreadState::Dead;
+            }
+        }
+    }
+}
+
+/// Give thread `tid` a copy of the calling thread's current FPU/SSE registers (fork).
+pub fn inherit_fpu_state(tid: usize) {
+    let mut lock = SCHEDULER.lock();
+    if let Some(sched) = lock.as_mut() {
+        if let Some(thread) = sched.threads.iter_mut().find(|t| t.id == tid) {
+            unsafe {
+                core::arch::asm!("fxsave64 [{}]", in(reg) thread.fpu.0.as_mut_ptr(), options(nostack, preserves_flags));
+            }
+        }
     }
 }
 

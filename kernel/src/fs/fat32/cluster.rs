@@ -46,6 +46,10 @@ impl ClusterManager {
         }
     }
 
+    pub fn cluster_bytes(&self) -> usize {
+        self.layout.cluster_bytes()
+    }
+
     pub fn read_cluster(&self, cluster: u32, buf: &mut [u8]) -> Result<(), &'static str> {
         let lba = self.layout.cluster_to_lba(cluster);
         self.device.read_blocks(lba, self.layout.sectors_per_cluster as usize, buf)

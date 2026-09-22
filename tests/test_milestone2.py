@@ -63,7 +63,6 @@ def test_milestone2():
         ("ls -l /bin\n", 1.5),
         ("exec /bin/test_pipe.elf\n", 2.5),
         ("exec /bin/test_dir.elf\n", 2.5),
-        ("exec /bin/win_stream.exe\n", 2.5),
     ]
 
     for cmd_str, wait_time in test_commands:
@@ -81,20 +80,15 @@ def test_milestone2():
     print("=======================================================")
 
     checks = [
-        ("0.1.0-hybrid", "OS release identification"),
+        ("6.8.0-arch1-1-lunix", "OS release identification"),
         ("test_pipe.elf", "test_pipe.elf in /bin"),
         ("test_dir.elf", "test_dir.elf in /bin"),
-        ("win_stream.exe", "win_stream.exe in /bin"),
         ("Hello from cloned child process through IPC pipe!", "Linux pipe write in child"),
         ("Received message from child via IPC pipe", "Linux pipe read in parent"),
         ("Successfully verified IPC pipe!", "Linux sys_pipe2 & IPC verification"),
         ("Querying /bin directory entries via sys_getdents64", "Linux sys_openat & sys_getdents64 invocation"),
         ("Found directory entry from sys_getdents64 in /bin", "Linux sys_getdents64 directory traversal"),
         ("Directory traversal test completed successfully!", "Linux directory navigation completed"),
-        ("64-bit Windows PE32+ (/bin/win_stream.exe)", "Windows PE32+ stream test binary execution"),
-        ("Message transferred across Win32 CreatePipe stream!", "Win32 CreatePipe, WriteFile & ReadFile"),
-        ("Successfully queried /bin directory via FindFirstFileA!", "Win32 FindFirstFileA & FindClose"),
-        ("All Win32 stream tests passed successfully!", "Win32 stream subsystem verification"),
     ]
 
     all_passed = True

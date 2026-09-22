@@ -6,7 +6,8 @@
 use alloc::sync::Arc;
 use spin::Mutex;
 
-pub const PIPE_BUFFER_CAPACITY: usize = 4096;
+/// Linux default pipe size.
+pub const PIPE_BUFFER_CAPACITY: usize = 65536;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PipeError {
@@ -16,7 +17,7 @@ pub enum PipeError {
 }
 
 pub struct PipeBuffer {
-    buffer: [u8; PIPE_BUFFER_CAPACITY],
+    buffer: alloc::vec::Vec<u8>,
     head: usize,
     tail: usize,
     count: usize,
@@ -29,7 +30,7 @@ pub struct PipeBuffer {
 impl PipeBuffer {
     pub fn new() -> Self {
         Self {
-            buffer: [0u8; PIPE_BUFFER_CAPACITY],
+            buffer: alloc::vec![0u8; PIPE_BUFFER_CAPACITY],
             head: 0,
             tail: 0,
             count: 0,

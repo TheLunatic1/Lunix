@@ -8,7 +8,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, Ordering};
 use spin::Mutex;
-use crate::arch::x86_64::io::{inl, inw, outb, outl, outw};
+use crate::arch::x86_64::io::{inb, inl, inw, outb, outl, outw};
 use crate::drivers::pci;
 use crate::drivers::virtio::*;
 use crate::fs::block::{register_block_device, BlockDevice};
@@ -21,7 +21,18 @@ pub const VIRTIO_BLK_T_OUT: u32 = 1;  // Write
 pub const VIRTIO_BLK_S_OK: u8 = 0;
 pub const VIRTIO_BLK_S_IOERR: u8 = 1;
 
-const QUEUE_SIZE: usize = 64;
+/// Largest transfer done as a single virtio request/descriptor (256 sectors = 128 KiB, matching
+/// the ATA driver's per-command run size). `read_blocks`/`write_blocks` split anything larger
+/// into chunks of this size before calling the internal single-request functions.
+const MAX_CHUNK_SECTORS: usize = 256;
+
+// Note: the ring size used throughout this driver is always the device-reported `QueueNum`
+// (read from the legacy virtio-pci `QUEUE_NUM` register at init), never a value the driver
+// invents. The legacy transport gives the driver no way to ask for a smaller queue than the
+// device already committed to when it laid out `QueueNum`-sized avail/used rings internally;
+// using any other size desyncs the avail/used ring offsets from what the device computes,
+// corrupting every transfer (this was a real bug here: a hardcoded 64-entry assumption against
+// a device that actually reports a different QueueNum silently produced garbage reads).
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
@@ -41,11 +52,44 @@ pub struct VirtioBlkDevice {
     pub io_base: u16,
     pub total_sectors: u64,
     queue_phys: u64,
+    /// The device's actual `QueueNum` (ring entry count) — see the note on `QUEUE_SIZE_FALLBACK`.
+    queue_size: usize,
     state: Mutex<VirtioBlkState>,
+}
+
+impl VirtioBlkDevice {
+    /// Byte offset of the used ring within the queue region, matching exactly how the device
+    /// itself lays out the same queue (legacy virtio queue layout, spec 2.4.2).
+    fn used_ring_offset(queue_size: usize) -> u64 {
+        let desc_bytes = (queue_size * core::mem::size_of::<VirtqDesc>()) as u64;
+        let avail_bytes = 4 + 2 * queue_size as u64;
+        (desc_bytes + avail_bytes + 4095) & !4095
+    }
 }
 
 pub static VIRTIO_BLK_INITIALIZED: AtomicBool = AtomicBool::new(false);
 pub static VIRTIO_BLK_DEVICES: Mutex<Vec<Arc<VirtioBlkDevice>>> = Mutex::new(Vec::new());
+
+/// Frees a run of `n` DMA frames on drop, whichever way the function returns (including the
+/// early `?`/`return Err` paths below). Without this, every single read/write call permanently
+/// leaked its request and data frames — harmless for the handful of reads at boot, but under a
+/// sustained heavy read workload (X server font/library loading, many concurrent file opens) it
+/// exhausts physical memory over time with no error until something else's allocation fails.
+struct DmaFrames {
+    addr: u64,
+    frames: usize,
+}
+impl DmaFrames {
+    fn alloc(frames: usize) -> Result<Self, &'static str> {
+        let addr = pmm::alloc_frames_contig(frames).ok_or("Failed to allocate VirtIO DMA frame(s)")?;
+        Ok(Self { addr: addr.as_u64(), frames })
+    }
+}
+impl Drop for DmaFrames {
+    fn drop(&mut self) {
+        pmm::free_frames_contig(x86_64::PhysAddr::new(self.addr), self.frames);
+    }
+}
 
 impl VirtioBlkDevice {
     fn read_sectors_internal(&self, start_sector: u64, count: usize, buf: &mut [u8]) -> Result<(), &'static str> {
@@ -54,11 +98,15 @@ impl VirtioBlkDevice {
             return Err("Destination buffer too small");
         }
 
-        let req_frame = pmm::alloc_frame().ok_or("Failed to allocate VirtIO request frame")?;
-        let req_phys = req_frame.as_u64();
-
-        let data_frame = pmm::alloc_frame().ok_or("Failed to allocate VirtIO data frame")?;
-        let data_phys = data_frame.as_u64();
+        // One frame for the request header + status byte (both always fit in one page); the
+        // data buffer is sized to the actual transfer, not a single fixed 4 KiB frame — a
+        // request over 8 sectors (4 KiB) used to tell the device to DMA past the end of that
+        // one frame into whatever physical memory happened to follow it. Both are freed when
+        // dropped at the end of this function, on every return path.
+        let req_dma = DmaFrames::alloc(1)?;
+        let req_phys = req_dma.addr;
+        let data_dma = DmaFrames::alloc((byte_len + 4095) / 4096)?;
+        let data_phys = data_dma.addr;
 
         let status_phys = req_phys + 512;
 
@@ -102,11 +150,11 @@ impl VirtioBlkDevice {
             };
 
             // Add descriptor 0 to Available Ring
-            let avail_offset = (QUEUE_SIZE * core::mem::size_of::<VirtqDesc>()) as u64;
+            let avail_offset = (self.queue_size * core::mem::size_of::<VirtqDesc>()) as u64;
             let avail_ring_ptr = (self.queue_phys + avail_offset) as *mut u16;
 
             let cur_idx = state.avail_idx;
-            *avail_ring_ptr.add(2 + (cur_idx as usize % QUEUE_SIZE)) = 0;
+            *avail_ring_ptr.add(2 + (cur_idx as usize % self.queue_size)) = 0;
             state.avail_idx = state.avail_idx.wrapping_add(1);
             core::ptr::write_volatile(avail_ring_ptr.add(1), state.avail_idx);
 
@@ -114,10 +162,10 @@ impl VirtioBlkDevice {
             outw(self.io_base + VIRTIO_PCI_QUEUE_NOTIFY, 0);
 
             // Poll Used Ring
-            let used_offset = ((avail_offset + (4 + 2 * QUEUE_SIZE as u64) + 4095) & !4095) as u64;
+            let used_offset = Self::used_ring_offset(self.queue_size);
             let used_ring_ptr = (self.queue_phys + used_offset) as *const u16;
 
-            let mut timeout = 100_000;
+            let mut timeout = 100_000_000u64;
             while core::ptr::read_volatile(used_ring_ptr.add(1)) == state.last_used_idx {
                 timeout -= 1;
                 if timeout == 0 {
@@ -127,6 +175,20 @@ impl VirtioBlkDevice {
             }
 
             state.last_used_idx = core::ptr::read_volatile(used_ring_ptr.add(1));
+
+            // Legacy virtio-pci raises its INTx# line on every used-ring update regardless of
+            // whether the driver actually waits on interrupts; reading the ISR status register
+            // is what acknowledges and deasserts it (a side effect of the read, per the virtio
+            // 1.0 spec's legacy-transport section). This driver only ever polls and never
+            // installed an IRQ handler for this device, so skipping this read left the line
+            // permanently asserted after the very first request — harmless-looking (this driver
+            // doesn't need the interrupt), but if the INTx# line is electrically shared with
+            // another device behind the same IOAPIC pin (common on QEMU's PCI INTx routing),
+            // a stuck-asserted shared level-triggered line can suppress that other device's
+            // interrupts too. Observed effect: fine at boot, but X/JWM/xterm startup (heavier
+            // concurrent keyboard/timer/AF_UNIX activity) stalled indefinitely after this device
+            // was added, with no fault or error logged anywhere.
+            let _ = inb(self.io_base + VIRTIO_PCI_ISR);
 
             if core::ptr::read_volatile(status_ptr) != VIRTIO_BLK_S_OK {
                 return Err("VirtIO-Block device returned error status");
@@ -144,11 +206,10 @@ impl VirtioBlkDevice {
             return Err("Source buffer too small");
         }
 
-        let req_frame = pmm::alloc_frame().ok_or("Failed to allocate VirtIO request frame")?;
-        let req_phys = req_frame.as_u64();
-
-        let data_frame = pmm::alloc_frame().ok_or("Failed to allocate VirtIO data frame")?;
-        let data_phys = data_frame.as_u64();
+        let req_dma = DmaFrames::alloc(1)?;
+        let req_phys = req_dma.addr;
+        let data_dma = DmaFrames::alloc((byte_len + 4095) / 4096)?;
+        let data_phys = data_dma.addr;
 
         let status_phys = req_phys + 512;
 
@@ -193,20 +254,20 @@ impl VirtioBlkDevice {
                 next: 0,
             };
 
-            let avail_offset = (QUEUE_SIZE * core::mem::size_of::<VirtqDesc>()) as u64;
+            let avail_offset = (self.queue_size * core::mem::size_of::<VirtqDesc>()) as u64;
             let avail_ring_ptr = (self.queue_phys + avail_offset) as *mut u16;
 
             let cur_idx = state.avail_idx;
-            *avail_ring_ptr.add(2 + (cur_idx as usize % QUEUE_SIZE)) = 0;
+            *avail_ring_ptr.add(2 + (cur_idx as usize % self.queue_size)) = 0;
             state.avail_idx = state.avail_idx.wrapping_add(1);
             core::ptr::write_volatile(avail_ring_ptr.add(1), state.avail_idx);
 
             outw(self.io_base + VIRTIO_PCI_QUEUE_NOTIFY, 0);
 
-            let used_offset = ((avail_offset + (4 + 2 * QUEUE_SIZE as u64) + 4095) & !4095) as u64;
+            let used_offset = Self::used_ring_offset(self.queue_size);
             let used_ring_ptr = (self.queue_phys + used_offset) as *const u16;
 
-            let mut timeout = 100_000;
+            let mut timeout = 100_000_000u64;
             while core::ptr::read_volatile(used_ring_ptr.add(1)) == state.last_used_idx {
                 timeout -= 1;
                 if timeout == 0 {
@@ -216,6 +277,10 @@ impl VirtioBlkDevice {
             }
 
             state.last_used_idx = core::ptr::read_volatile(used_ring_ptr.add(1));
+
+            // See the matching comment in read_sectors_internal: this read acknowledges and
+            // deasserts the device's INTx# line.
+            let _ = inb(self.io_base + VIRTIO_PCI_ISR);
 
             if core::ptr::read_volatile(status_ptr) != VIRTIO_BLK_S_OK {
                 return Err("VirtIO-Block device returned error status");
@@ -236,11 +301,27 @@ impl BlockDevice for VirtioBlkDevice {
     }
 
     fn read_blocks(&self, start_block: u64, count: usize, buf: &mut [u8]) -> Result<(), &'static str> {
-        self.read_sectors_internal(start_block, count, buf)
+        // One virtio request per chunk of up to MAX_CHUNK_SECTORS: bounds each request's DMA
+        // buffer to a small, easy-to-satisfy contiguous allocation instead of needing one
+        // arbitrarily large (and, as the caller's read grows, increasingly hard to find)
+        // contiguous physical run for the whole transfer in a single descriptor.
+        let mut done = 0usize;
+        while done < count {
+            let n = (count - done).min(MAX_CHUNK_SECTORS);
+            self.read_sectors_internal(start_block + done as u64, n, &mut buf[done * 512..(done + n) * 512])?;
+            done += n;
+        }
+        Ok(())
     }
 
     fn write_blocks(&self, start_block: u64, count: usize, buf: &[u8]) -> Result<(), &'static str> {
-        self.write_sectors_internal(start_block, count, buf)
+        let mut done = 0usize;
+        while done < count {
+            let n = (count - done).min(MAX_CHUNK_SECTORS);
+            self.write_sectors_internal(start_block + done as u64, n, &buf[done * 512..(done + n) * 512])?;
+            done += n;
+        }
+        Ok(())
     }
 }
 
@@ -270,20 +351,27 @@ pub fn init() {
 
         // Select Queue 0
         outw(io_base + VIRTIO_PCI_QUEUE_SEL, 0);
-        let q_num = inw(io_base + VIRTIO_PCI_QUEUE_NUM);
+        let q_num = inw(io_base + VIRTIO_PCI_QUEUE_NUM) as usize;
         if q_num == 0 {
             lunix_serial_println!("  [VirtIO-Blk] Queue 0 not available");
             return;
         }
+        // The legacy transport gives the driver no say in queue size: QueueNum is the device's
+        // own ring size, and desc/avail/used offsets must be computed from exactly that value
+        // (see the note on QUEUE_SIZE_FALLBACK) or every transfer silently reads/writes the
+        // wrong bytes.
+        let used_end = VirtioBlkDevice::used_ring_offset(q_num) + 4 + 8 * q_num as u64;
+        let frames_needed = ((used_end + 4095) / 4096) as usize;
 
-        // Allocate 2 frames for queue rings
-        let q_frame = match pmm::alloc_frame() {
+        let q_frame = match pmm::alloc_frames_contig(frames_needed) {
             Some(f) => f.as_u64(),
-            None => return,
+            None => {
+                lunix_serial_println!("  [VirtIO-Blk] Failed to allocate {} contiguous frame(s) for queue", frames_needed);
+                return;
+            }
         };
-        let _ = pmm::alloc_frame(); // Second frame for alignment
 
-        core::ptr::write_bytes(q_frame as *mut u8, 0, 8192);
+        core::ptr::write_bytes(q_frame as *mut u8, 0, frames_needed * 4096);
 
         // Configure PFN
         outl(io_base + VIRTIO_PCI_QUEUE_PFN, (q_frame / 4096) as u32);
@@ -301,6 +389,7 @@ pub fn init() {
             io_base,
             total_sectors: if total_sectors > 0 { total_sectors } else { 131072 },
             queue_phys: q_frame,
+            queue_size: q_num,
             state: Mutex::new(VirtioBlkState {
                 avail_idx: 0,
                 last_used_idx: 0,

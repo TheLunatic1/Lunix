@@ -13,6 +13,21 @@ pub enum ThreadState {
     Dead,
 }
 
+/// `fxsave` image: x87 + MMX + SSE state of a thread (512 bytes, 16-byte aligned).
+#[repr(C, align(16))]
+#[derive(Clone)]
+pub struct FpuState(pub [u8; 512]);
+
+impl FpuState {
+    /// State after `fninit` with default MXCSR: what a new program starts with.
+    pub fn initial() -> Self {
+        let mut s = [0u8; 512];
+        s[0..2].copy_from_slice(&0x037Fu16.to_le_bytes()); // FCW: all exceptions masked, 64-bit precision
+        s[24..28].copy_from_slice(&0x1F80u32.to_le_bytes()); // MXCSR
+        FpuState(s)
+    }
+}
+
 pub struct Thread {
     pub id: usize,
     pub name: String,
@@ -26,6 +41,11 @@ pub struct Thread {
     pub fs_base: u64,
     pub entry_fn: Option<fn()>,
     pub is_user: bool,
+    /// Saved FPU/SSE registers while the thread is not running.
+    pub fpu: FpuState,
+    /// `CLONE_CHILD_CLEARTID` / `set_tid_address`: on thread exit the kernel writes 0 here
+    /// and wakes the futex (this is how `pthread_join` finds out the thread ended).
+    pub clear_child_tid: u64,
 }
 
 impl Thread {
@@ -71,6 +91,8 @@ impl Thread {
             fs_base: 0,
             entry_fn: Some(entry_fn),
             is_user: false,
+            fpu: FpuState::initial(),
+            clear_child_tid: 0,
         }
     }
 

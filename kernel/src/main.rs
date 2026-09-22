@@ -15,7 +15,6 @@ pub mod drivers;
 pub mod fs;
 pub mod mm;
 pub mod net;
-pub mod subsystems;
 pub mod sync;
 pub mod syscall;
 pub mod task;
@@ -60,13 +59,7 @@ pub extern "sysv64" fn kmain(boot_info: &'static BootInfo) -> ! {
     // 2. Initialize Graphical Display & Console
     display::init(boot_info.framebuffer);
 
-    lunix_println!("  _                 _        ____   _____ ");
-    lunix_println!(" | |   _   _ _ __  (_)_  __ / __ \\ / ____|");
-    lunix_println!(" | |  | | | | '_ \\ | \\ \\/ /| |  | | (___  ");
-    lunix_println!(" | |__| |_| | | | || |>  < | |__| |\\___ \\ ");
-    lunix_println!(" |_____\\__,_|_| |_||_/_/\\_\\ \\____/ |_____/");
-    lunix_println!("");
-    lunix_println!(" [+] Lunix Kernel v0.1.0 Initializing in 64-bit Long Mode...");
+    lunix_println!("Lunix kernel {} (x86_64) - Rust bare-metal Linux-compatible kernel", env!("CARGO_PKG_VERSION"));
 
     // 3. Initialize CPU Descriptors (GDT, TSS, IDT, PIC)
     arch::x86_64::gdt::init();
@@ -96,10 +89,6 @@ pub extern "sysv64" fn kmain(boot_info: &'static BootInfo) -> ! {
     // 8. Initialize Network Protocol Stack (TCP/IP)
     net::init();
 
-    // 8. Initialize Windows NT Driver Compatibility Subsystem
-    subsystems::init();
-    lunix_println!("[+] Windows NT Subsystem (WDM / extern \"win64\" ABI) ready.");
-
     // 9. Initialize Preemptive Multitasking & Task Scheduler
     task::init();
     lunix_println!("[+] Preemptive Multitasking & Priority Scheduler active.");
@@ -112,12 +101,20 @@ pub extern "sysv64" fn kmain(boot_info: &'static BootInfo) -> ! {
     x86_64::instructions::interrupts::enable();
     lunix_serial_println!("[kmain] Hardware Interrupts enabled.");
 
-    lunix_println!("");
-    lunix_println!("===============================================================");
-    lunix_println!("  LUNIX READY. Type on your keyboard or explore with 'help'!");
-    lunix_println!("===============================================================");
-    drivers::keyboard::print_prompt();
-    // Run interactive shell loop on BSP kernel main thread (TID 0) with interrupts enabled
+    // 12. Hand control to userspace: exec PID 1 from the root filesystem.
+    // The tty flag is set first: init may already be running (and reading the tty)
+    // before this thread gets scheduled again.
+    drivers::keyboard::set_userspace_tty(true);
+    if task::start_init().is_some() {
+        // Nothing to print: init already owns the console.
+    } else {
+        drivers::keyboard::set_userspace_tty(false);
+        lunix_println!("[-] No init found on root filesystem; falling back to kernel debug console.");
+        drivers::keyboard::print_prompt();
+    }
+
+    // The boot thread doubles as the console input pump: it feeds keyboard and
+    // serial bytes to the tty line discipline (or the debug console if there is no init).
     drivers::keyboard::run_shell_loop()
 }
 

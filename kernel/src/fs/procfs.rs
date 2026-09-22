@@ -24,7 +24,7 @@ impl ProcFs {
     }
 
     fn generate_version() -> String {
-        format!("Linux version 6.8.0-lunix-hybrid (root@lunix) (rustc 1.85.0-nightly #1 SMP PREEMPT 2026-09-12)\n")
+        format!("Linux version 6.8.0-lunix-pure (root@lunix) (rustc 1.85.0-nightly #1 SMP PREEMPT 2026-09-21)\n")
     }
 
     fn generate_meminfo() -> String {

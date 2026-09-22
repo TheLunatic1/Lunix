@@ -106,14 +106,9 @@ pub fn write_raw_byte(byte: u8) {
 }
 
 pub fn write_byte(byte: u8) {
-    if byte == b'\x08' {
-        // Erase character on ANSI/VT100 terminal: backspace, space, backspace
-        write_raw_byte(b'\x08');
-        write_raw_byte(b' ');
-        write_raw_byte(b'\x08');
-    } else {
-        write_raw_byte(byte);
-    }
+    // Bytes go out untouched: userspace (readline) uses \x08 purely as "cursor left".
+    // Kernel-side erasing sends backspace-space-backspace explicitly.
+    write_raw_byte(byte);
 }
 
 pub struct DirectSerialWriter;
@@ -136,13 +131,7 @@ pub fn write_str(s: &str) {
         let _guard = SERIAL_PORT_LOCK.lock();
         unsafe {
             for byte in s.bytes() {
-                if byte == b'\x08' {
-                    write_raw_byte_unlocked(b'\x08');
-                    write_raw_byte_unlocked(b' ');
-                    write_raw_byte_unlocked(b'\x08');
-                } else {
-                    write_raw_byte_unlocked(byte);
-                }
+                write_raw_byte_unlocked(byte);
             }
         }
     });
@@ -194,4 +183,34 @@ macro_rules! lunix_serial_println {
         $crate::arch::x86_64::serial::_print(format_args!($($arg)*));
         $crate::arch::x86_64::serial::_print(format_args!("\n"));
     }};
+}
+
+/// Verbose kernel tracing (every syscall, ELF load, ...). Off by default: serial output is
+/// slow enough at this volume to overrun the UART receive FIFO and drop typed characters.
+/// Enable with `cargo build --features strace`; set `LUNIX_STRACE_COMM=Xorg` at build time
+/// to trace only processes whose executable path contains that string.
+pub const TRACE: bool = cfg!(feature = "strace");
+const TRACE_COMM: Option<&str> = option_env!("LUNIX_STRACE_COMM");
+
+pub fn trace_enabled() -> bool {
+    if !TRACE {
+        return false;
+    }
+    match TRACE_COMM {
+        None => true,
+        Some(want) => crate::task::scheduler::get_current_process()
+            // try_lock: the caller may already hold this process's lock.
+            // `want` may hold several comma-separated substrings.
+            .map(|p| p.try_lock().map(|g| want.split(',').any(|w| g.name.contains(w))).unwrap_or(true))
+            .unwrap_or(false),
+    }
+}
+
+#[macro_export]
+macro_rules! lunix_strace {
+    ($($arg:tt)*) => {
+        if $crate::arch::x86_64::serial::trace_enabled() {
+            $crate::lunix_serial_println!($($arg)*);
+        }
+    };
 }

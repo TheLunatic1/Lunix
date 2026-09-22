@@ -120,9 +120,23 @@ impl FileHandle for TtyHandle {
         if buf.is_empty() {
             return Ok(0);
         }
-        // Return 0 or single newline if idle
-        buf[0] = b'\n';
-        Ok(1)
+        let n = crate::drivers::tty::read(buf, false);
+        if n < 0 { Err("tty read failed") } else { Ok(n as usize) }
+    }
+
+    fn read_nonblock(&mut self, buf: &mut [u8]) -> Result<usize, &'static str> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        match crate::drivers::tty::read(buf, true) {
+            -11 => Err("EAGAIN"),
+            n if n < 0 => Err("tty read failed"),
+            n => Ok(n as usize),
+        }
+    }
+
+    fn poll_readable(&self) -> bool {
+        crate::drivers::tty::has_input()
     }
 
     fn write(&mut self, buf: &[u8]) -> Result<usize, &'static str> {
@@ -145,19 +159,66 @@ impl FileHandle for TtyHandle {
     }
 }
 
+/// A `/dev/<name>` node backed by a real registered `BlockDevice` (e.g. `sda`, `vda`).
+/// Reads/writes are sector-aligned under the hood; partial sectors are handled with a
+/// read-modify-write so callers can use arbitrary offsets and lengths, as on real Linux.
 pub struct BlockDevHandle {
+    dev_name: String,
     position: u64,
     size: u64,
 }
+
+impl BlockDevHandle {
+    pub fn new(dev_name: &str) -> Self {
+        let dev = crate::fs::block::get_block_device(dev_name);
+        let size = dev.map(|d| d.total_blocks() * d.block_size() as u64).unwrap_or(0);
+        Self { dev_name: String::from(dev_name), position: 0, size }
+    }
+}
+
 impl FileHandle for BlockDevHandle {
     fn read(&mut self, buf: &mut [u8]) -> Result<usize, &'static str> {
-        buf.fill(0);
-        self.position = self.position.saturating_add(buf.len() as u64);
-        Ok(buf.len())
+        let Some(dev) = crate::fs::block::get_block_device(&self.dev_name) else {
+            buf.fill(0);
+            self.position = self.position.saturating_add(buf.len() as u64);
+            return Ok(buf.len());
+        };
+        let bs = dev.block_size() as u64;
+        let want = (buf.len() as u64).min(self.size.saturating_sub(self.position));
+        if want == 0 {
+            return Ok(0);
+        }
+        let start_block = self.position / bs;
+        let end_block = (self.position + want - 1) / bs + 1;
+        let nblocks = (end_block - start_block) as usize;
+        let mut tmp = alloc::vec![0u8; nblocks * bs as usize];
+        dev.read_blocks(start_block, nblocks, &mut tmp).map_err(|_| "Block device read error")?;
+        let off = (self.position - start_block * bs) as usize;
+        buf[..want as usize].copy_from_slice(&tmp[off..off + want as usize]);
+        self.position += want;
+        Ok(want as usize)
     }
 
     fn write(&mut self, buf: &[u8]) -> Result<usize, &'static str> {
-        self.position = self.position.saturating_add(buf.len() as u64);
+        let Some(dev) = crate::fs::block::get_block_device(&self.dev_name) else {
+            self.position = self.position.saturating_add(buf.len() as u64);
+            return Ok(buf.len());
+        };
+        let bs = dev.block_size() as u64;
+        let start_block = self.position / bs;
+        let end_block = (self.position + buf.len() as u64 - 1) / bs + 1;
+        let nblocks = (end_block - start_block) as usize;
+        let mut tmp = alloc::vec![0u8; nblocks * bs as usize];
+        // Read-modify-write: fetch the covering blocks first so partial-sector writes at the
+        // ends don't clobber neighboring data.
+        let _ = dev.read_blocks(start_block, nblocks, &mut tmp);
+        let off = (self.position - start_block * bs) as usize;
+        tmp[off..off + buf.len()].copy_from_slice(buf);
+        dev.write_blocks(start_block, nblocks, &tmp).map_err(|_| "Block device write error")?;
+        self.position += buf.len() as u64;
+        if self.position > self.size {
+            self.size = self.position;
+        }
         Ok(buf.len())
     }
 
@@ -297,14 +358,22 @@ impl FileSystem for DevFs {
             "null" => Ok(Box::new(NullHandle)),
             "zero" => Ok(Box::new(ZeroHandle)),
             "urandom" | "random" => Ok(Box::new(RandomHandle)),
-            "tty" | "console" | "tty0" | "tty1" | "tty2" | "ptmx" | "pts/0" | "pts/1" => Ok(Box::new(TtyHandle)),
+            "tty" | "console" | "tty0" | "tty1" | "tty2" => Ok(Box::new(TtyHandle)),
+            // Pseudo-terminals: /dev/ptmx allocates a new pair; /dev/pts/N is its slave.
+            "ptmx" | "pts/ptmx" => Ok(Box::new(crate::drivers::pty::PtyMaster::open())),
+            p if p.starts_with("pts/") => {
+                let idx: usize = p[4..].parse().map_err(|_| VfsError::NotFound)?;
+                match crate::drivers::pty::PtySlave::open(idx) {
+                    Some(s) => Ok(Box::new(s)),
+                    None => Err(VfsError::NotFound),
+                }
+            }
             "fb0" | "fb/0" | "graphics/fb0" => Ok(Box::new(FbHandle::new())),
-            "mice" | "input/mice" => Ok(Box::new(MiceHandle)),
-            "input/event0" => Ok(Box::new(MiceHandle)),
-            "sda" => Ok(Box::new(BlockDevHandle {
-                position: 0,
-                size: 64 * 1024 * 1024,
-            })),
+            "input/event0" => Ok(Box::new(crate::drivers::evdev::EventDev::new(crate::drivers::evdev::KEYBOARD))),
+            "input/event1" => Ok(Box::new(crate::drivers::evdev::EventDev::new(crate::drivers::evdev::MOUSE))),
+            "mice" | "mouse" | "input/mice" | "input/mouse" => Ok(Box::new(MiceHandle)),
+            "input/mice0" | "input/mice1" => Ok(Box::new(MiceHandle)),
+            "sda" | "vda" => Ok(Box::new(BlockDevHandle::new(clean))),
             _ => Err(VfsError::NotFound),
         }
     }
@@ -370,12 +439,14 @@ impl FileSystem for DevFs {
                 node_type: INodeType::CharDevice,
                 size: 0,
             },
-            DirectoryEntry {
-                name: String::from("sda"),
-                node_type: INodeType::BlockDevice,
-                size: 64 * 1024 * 1024,
-            },
         ];
+        let mut entries = entries;
+        for name in crate::fs::block::list_block_devices() {
+            let size = crate::fs::block::get_block_device(&name)
+                .map(|d| d.total_blocks() * d.block_size() as u64)
+                .unwrap_or(0);
+            entries.push(DirectoryEntry { name, node_type: INodeType::BlockDevice, size });
+        }
 
         Ok(entries)
     }
@@ -425,7 +496,14 @@ impl FileSystem for DevFs {
                 permissions: 0o666,
                 name: String::from("random"),
             }),
-            "tty" | "tty0" | "tty1" | "tty2" | "ptmx" | "pts/0" | "pts/1" => Ok(INode {
+            p if p.starts_with("pts/") && p[4..].parse::<usize>().map_or(false, crate::drivers::pty::exists) => Ok(INode {
+                id: 100 + p[4..].parse::<u64>().unwrap_or(0),
+                size: 0,
+                node_type: INodeType::CharDevice,
+                permissions: 0o620,
+                name: String::from(p),
+            }),
+            "tty" | "tty0" | "tty1" | "tty2" | "ptmx" | "pts/ptmx" => Ok(INode {
                 id: 6,
                 size: 0,
                 node_type: INodeType::CharDevice,
@@ -446,27 +524,32 @@ impl FileSystem for DevFs {
                 permissions: 0o666,
                 name: String::from("fb0"),
             }),
-            "mice" | "input/mice" => Ok(INode {
+            "input/event0" | "input/event1" => Ok(INode {
+                id: 11,
+                size: 0,
+                node_type: INodeType::CharDevice,
+                permissions: 0o660,
+                name: String::from("event"),
+            }),
+            "mice" | "mouse" | "input/mice" | "input/mouse" | "input/mice0" | "input/mice1" => Ok(INode {
                 id: 10,
                 size: 0,
                 node_type: INodeType::CharDevice,
                 permissions: 0o666,
                 name: String::from("mice"),
             }),
-            "input/event0" => Ok(INode {
-                id: 11,
-                size: 0,
-                node_type: INodeType::CharDevice,
-                permissions: 0o666,
-                name: String::from("event0"),
-            }),
-            "sda" => Ok(INode {
-                id: 8,
-                size: 64 * 1024 * 1024,
-                node_type: INodeType::BlockDevice,
-                permissions: 0o660,
-                name: String::from("sda"),
-            }),
+            "sda" | "vda" => {
+                let size = crate::fs::block::get_block_device(clean)
+                    .map(|d| d.total_blocks() * d.block_size() as u64)
+                    .ok_or(VfsError::NotFound)?;
+                Ok(INode {
+                    id: if clean == "vda" { 12 } else { 8 },
+                    size,
+                    node_type: INodeType::BlockDevice,
+                    permissions: 0o660,
+                    name: String::from(clean),
+                })
+            }
             _ => Err(VfsError::NotFound),
         }
     }

@@ -14,7 +14,7 @@ pub fn init() {
     let keyboard = Keyboard::new(
         ScancodeSet1::new(),
         layouts::Us104Key,
-        HandleControl::Ignore,
+        HandleControl::MapLettersToUnicode,
     );
     *KEYBOARD.lock() = Some(keyboard);
 }
@@ -91,13 +91,28 @@ pub enum ExecResult {
     AsyncProcessSpawned,
 }
 
+static USERSPACE_TTY: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// When set, console input goes to the tty line discipline (userspace reads it
+/// via /dev/tty and fd 0) instead of the built-in kernel debug console.
+pub fn set_userspace_tty(on: bool) {
+    USERSPACE_TTY.store(on, core::sync::atomic::Ordering::SeqCst);
+}
+
+pub fn userspace_tty() -> bool {
+    USERSPACE_TTY.load(core::sync::atomic::Ordering::SeqCst)
+}
+
 pub fn print_prompt() {
+    if userspace_tty() {
+        return;
+    }
     LAST_WAS_CR.store(false, core::sync::atomic::Ordering::Relaxed);
     let cwd = get_cwd();
     if cwd == "/" {
-        lunix_print!("lunix> ");
+        lunix_print!("lunix-debug:/# ");
     } else {
-        lunix_print!("lunix:{}> ", cwd);
+        lunix_print!("lunix-debug:{}# ", cwd);
     }
 }
 
@@ -116,7 +131,7 @@ fn execute_command(cmd: &str) -> ExecResult {
     match command {
         "help" => {
             lunix_println!("===============================================================");
-            lunix_println!("              Lunix OS Linux & POSIX Shell Commands           ");
+            lunix_println!("       Lunix kernel debug console (fallback when no init)          ");
             lunix_println!("===============================================================");
             lunix_println!("  ls [-l] [path]  - List directory contents (e.g. ls, ls /bin)");
             lunix_println!("  cat <path>      - Display file text content (e.g. cat /etc/os-release)");
@@ -142,18 +157,11 @@ fn execute_command(cmd: &str) -> ExecResult {
             lunix_println!("  pci             - Scan and list hardware PCI bus devices");
             lunix_println!("  block           - List registered block storage devices");
             lunix_println!("  storage         - Display storage controllers (ATA, AHCI, NVMe, VirtIO)");
-            lunix_println!("  ahci            - Display AHCI / SATA host controller details & ports");
-            lunix_println!("  nvme            - Display NVMe PCIe controller status & namespaces");
-            lunix_println!("  virtio          - Display VirtIO paravirtualized devices (blk & net)");
             lunix_println!("  stat <path>     - Display file or directory inode metadata");
             lunix_println!("  smp             - Display multi-core SMP and APIC status");
             lunix_println!("  acpi            - Display ACPI 2.0 tables and interrupt topology");
-            lunix_println!("  nt [load/list]  - Windows NT WDM driver management & live driver loading");
             lunix_println!("  spawn           - Spawn a preemptive background kernel worker thread");
             lunix_println!("  sysdemo         - Execute Ring 3 User Mode demo via fast SYSCALL ABI");
-            lunix_println!("  tinycore        - Bootstrap Tiny Core Linux Userspace Init Sequence (/sbin/init)");
-            lunix_println!("  init            - Execute PID 1 init process in Ring 3 userspace");
-            lunix_println!("  gui             - Launch LunixWM 32-bit Graphical Window Compositor");
             lunix_println!("  clear           - Clear console screen buffer");
             lunix_println!("  reboot          - Soft reboot machine via 8042 controller");
             lunix_println!("  panic           - Trigger a kernel panic diagnostic test");
@@ -244,7 +252,7 @@ fn execute_command(cmd: &str) -> ExecResult {
         }
         "uname" => {
             if arg1 == "-a" {
-                lunix_println!("Linux lunix-box 6.8.0-tinycore (Lunix 0.1.0-hybrid) #1 SMP PREEMPT 2026-09-14 x86_64 TinyCore/Lunix GNU/Linux");
+                lunix_println!("Linux arch 6.8.0-arch1-1-lunix (Lunix 0.1.0-arch-baremetal) #1 SMP PREEMPT 2026-09-21 x86_64 Arch Linux GNU/Linux");
             } else {
                 lunix_println!("Linux");
             }
@@ -302,18 +310,8 @@ fn execute_command(cmd: &str) -> ExecResult {
                                 lunix_println!("exec: cannot run ELF '{}': {}", resolved, e);
                             }
                         }
-                    } else if bytes.len() >= 2 && &bytes[0..2] == &[b'M', b'Z'] {
-                        // Windows 64-bit PE32+ Executable
-                        match crate::subsystems::nt::win32::exec_win32_pe(&resolved) {
-                            Ok(_) => {
-                                return ExecResult::AsyncProcessSpawned;
-                            }
-                            Err(e) => {
-                                lunix_println!("exec: cannot run Win32 PE '{}': {}", resolved, e);
-                            }
-                        }
                     } else {
-                        lunix_println!("exec: unrecognized executable format in '{}'", resolved);
+                        lunix_println!("exec: unrecognized executable format in '{}' (expected ELF64)", resolved);
                     }
                 }
                 Err(e) => {
@@ -379,17 +377,15 @@ fn execute_command(cmd: &str) -> ExecResult {
             lunix_println!("=======================================================");
             lunix_println!("               LUNIX OS KERNEL DMESG LOG               ");
             lunix_println!("=======================================================");
-            lunix_println!("[    0.000000] Linux/Lunix Kernel 0.1.0-hybrid (x86_64-baremetal)");
+            lunix_println!("[    0.000000] Linux/Lunix Kernel 0.1.0-pure (x86_64-baremetal)");
             lunix_println!("[    0.000001] ACPI: MADT Local APIC MMIO Base 0xFEE00000");
             lunix_println!("[    0.000002] IOAPIC: GSI 1 -> 0x21 (Keyboard), GSI 12 -> 0x2C (Mouse)");
             lunix_println!("[    0.000003] SMP: Booted Application Processor Core #1 via INIT-SIPI-SIPI");
             lunix_println!("[    0.000004] ATA/IDE: Registered /dev/sda block device (64 MB)");
             lunix_println!("[    0.000005] VFS: Mounted true FAT32 volume at '/'");
-            lunix_println!("[    0.000006] WDM: Initialized Windows NT Driver Subsystem (win64 ABI)");
-            lunix_println!("[    0.000007] E1000: Initialized Intel 82540EM Gigabit NIC (1000 Mbps)");
-            lunix_println!("[    0.000008] NET: TCP/IP Stack active (10.0.2.15/24, GW: 10.0.2.2)");
-            lunix_println!("[    0.000009] SYSCALL: Fast MSR IA32_LSTAR dispatcher active");
-            lunix_println!("[    0.000010] LunixWM: 32-bit double-buffered desktop compositor ready");
+            lunix_println!("[    0.000006] E1000: Initialized Intel 82540EM Gigabit NIC (1000 Mbps)");
+            lunix_println!("[    0.000007] NET: TCP/IP Stack active (10.0.2.15/24, GW: 10.0.2.2)");
+            lunix_println!("[    0.000008] SYSCALL: Fast MSR IA32_LSTAR dispatcher active");
         }
         "kill" => {
             if let Ok(tid) = arg1.parse::<usize>() {
@@ -400,10 +396,10 @@ fn execute_command(cmd: &str) -> ExecResult {
         }
         "info" => {
             lunix_println!("=======================================================");
-            lunix_println!("  Lunix OS Kernel v0.1.0 (Hybrid Windows NT + Linux)");
+            lunix_println!("  Lunix OS Kernel v0.1.0 (100% Rust Linux Bare-Metal)");
             lunix_println!("  Architecture : x86_64 (64-bit Long Mode)");
             lunix_println!("  Boot Protocol: Pure Rust Custom UEFI Bootloader (GOP)");
-            lunix_println!("  Subsystems   : PMM, VMM, ACPI/APIC/SMP, VFS/FAT32, Win64 WDM, ELF64");
+            lunix_println!("  Subsystems   : PMM, VMM, ACPI/APIC/SMP, VFS/FAT32, ELF64, TCP/IP");
             lunix_println!("=======================================================");
         }
         "mem" => {
@@ -530,33 +526,6 @@ fn execute_command(cmd: &str) -> ExecResult {
             lunix_println!("  virtio-blk : {}", if blk_init { "Active (/dev/vda)" } else { "Not Present" });
             lunix_println!("  virtio-net : {}", if net_init { "Active (VirtQueue Ring)" } else { "Not Present" });
         }
-        "nt" => {
-            if arg1 == "load" {
-                if arg2.is_empty() {
-                    lunix_println!("Usage: nt load <path.sys>");
-                    return ExecResult::Done;
-                }
-                let resolved = resolve_path(&cwd, arg2);
-                match crate::subsystems::nt::load_driver_from_vfs(&resolved) {
-                    Ok(_) => {
-                        lunix_println!("Windows NT driver '{}' loaded successfully.", resolved);
-                    }
-                    Err(e) => {
-                        lunix_println!("nt load: failed to load '{}': {}", resolved, e);
-                    }
-                }
-            } else if arg1 == "list" || arg1 == "drivers" {
-                crate::subsystems::nt::list_drivers();
-            } else {
-                lunix_println!("Windows NT Subsystem Status:");
-                lunix_println!("  Core API Exports: ntoskrnl.exe & hal.dll (extern \"win64\" ABI)");
-                lunix_println!("  Loaded Drivers  : \\Driver\\SampleLunixDriver (WDM)");
-                lunix_println!("  Created Devices : \\Device\\LunixSampleDevice0");
-                lunix_println!("  IRP Support     : MJ_CREATE, MJ_CLOSE, MJ_DEVICE_CONTROL, MJ_PNP, MJ_POWER");
-                lunix_println!("  DDI Extensions  : KeInitializeEvent, HalAllocateCommonBuffer, IoAttachDevice");
-                lunix_println!("  Commands        : 'nt list' (view drivers), 'nt load <path.sys>' (load driver)");
-            }
-        }
         "ps" => {
             let threads = crate::task::scheduler::list_threads();
             if arg1 == "-aux" || arg1 == "aux" || arg1 == "-ef" {
@@ -599,40 +568,6 @@ fn execute_command(cmd: &str) -> ExecResult {
             run_user_mode_demo();
             return ExecResult::AsyncProcessSpawned;
         }
-        "tinycore" | "init" => {
-            lunix_println!("=======================================================");
-            lunix_println!("  TINY CORE LINUX USERSPACE (PID 1 BOOT SEQUENCE)     ");
-            lunix_println!("=======================================================");
-            let init_path = if crate::fs::vfs::stat("/sbin/init").is_ok() {
-                "/sbin/init"
-            } else if crate::fs::vfs::stat("/bin/sh").is_ok() {
-                "/bin/sh"
-            } else {
-                "/bin/busybox"
-            };
-            match crate::task::elf::exec_elf_with_args(init_path, &["init"]) {
-                Ok(_) => {
-                    return ExecResult::AsyncProcessSpawned;
-                }
-                Err(e) => {
-                    lunix_println!("init: failed to launch '{}': {}", init_path, e);
-                }
-            }
-
-        }
-        "gui" => {
-            lunix_println!("Launching LunixWM 32-bit Graphical Window Compositor...");
-            if let Some(info) = crate::display::console::get_framebuffer_info() {
-                crate::display::desktop::init(info);
-                if let Some(ref mut comp) = *crate::display::compositor::COMPOSITOR.lock() {
-                    comp.is_gui_active = true;
-                }
-                crate::display::desktop::render_frame();
-                lunix_println!("[+] LunixWM desktop launched. Interactive multi-window GUI running at 60 FPS.");
-            } else {
-                lunix_println!("[-] Error: Framebuffer not initialized.");
-            }
-        }
         "clear" => {
             if let Some(ref mut console) = *crate::display::console::CONSOLE.lock() {
                 console.framebuffer.clear(console.bg_color);
@@ -655,10 +590,52 @@ fn execute_command(cmd: &str) -> ExecResult {
             panic!("User-requested test kernel panic from Lunix shell prompt!");
         }
         unknown => {
-            lunix_println!("Unknown command: '{}'. Type 'help' for available commands.", unknown);
+            let search_paths = [
+                alloc::format!("/usr/bin/{}", unknown),
+                alloc::format!("/bin/{}", unknown),
+                alloc::format!("/usr/local/bin/{}", unknown),
+                alloc::format!("/sbin/{}", unknown),
+                alloc::format!("{}", unknown),
+            ];
+            let mut executed = false;
+            for path in &search_paths {
+                if crate::fs::vfs::stat(path).is_ok() {
+                    let full_args: alloc::vec::Vec<&str> = trimmed.split_whitespace().collect();
+                    match crate::task::elf::exec_elf_with_args(path, &full_args) {
+                        Ok(_) => {
+                            return ExecResult::AsyncProcessSpawned;
+                        }
+                        Err(e) => {
+                            lunix_println!("exec: failed to execute '{}': {}", path, e);
+                            executed = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            if !executed {
+                lunix_println!("Unknown command: '{}'. Type 'help' for available commands.", unknown);
+            }
         }
     }
     ExecResult::Done
+}
+
+/// Kernel helper thread for `startx`: waits for the X server to come up, then
+/// launches the first upstream window manager found on the rootfs.
+fn spawn_window_manager() {
+    crate::task::scheduler::sleep_ms(1500);
+    for wm in ["/usr/bin/jwm", "/usr/bin/openbox", "/usr/local/bin/flwm"] {
+        if crate::fs::vfs::stat(wm).is_ok() {
+            let name = wm.rsplit('/').next().unwrap_or(wm);
+            match crate::task::elf::exec_elf_with_args(wm, &[name]) {
+                Ok(_) => lunix_println!("[+] startx: launched window manager {}", wm),
+                Err(e) => lunix_println!("[-] startx: failed to launch '{}': {}", wm, e),
+            }
+            return;
+        }
+    }
+    lunix_println!("[-] startx: no window manager found (jwm, openbox, flwm)");
 }
 
 const SCANCODE_QUEUE_SIZE: usize = 1024;
@@ -694,6 +671,14 @@ pub fn handle_serial_byte(b: u8) {
 }
 
 pub fn handle_chars(chars: &[char]) {
+    if userspace_tty() {
+        for &ch in chars {
+            if ch.is_ascii() {
+                crate::drivers::tty::input_byte(ch as u8);
+            }
+        }
+        return;
+    }
     let mut echo_buf = String::new();
 
     for &ch in chars {
@@ -711,10 +696,8 @@ pub fn handle_chars(chars: &[char]) {
                     buf.clear();
                     res
                 };
-                let res = execute_command(&cmd);
-                if res == ExecResult::Done {
-                    print_prompt();
-                }
+                let _res = execute_command(&cmd);
+                print_prompt();
             }
             '\x08' => {
                 if !echo_buf.is_empty() {
@@ -725,7 +708,7 @@ pub fn handle_chars(chars: &[char]) {
                 if !buf.is_empty() {
                     buf.pop();
                     drop(buf);
-                    lunix_print!("\x08");
+                    lunix_print!("\x08 \x08");
                 }
             }
             c => {
@@ -805,6 +788,8 @@ pub fn process_pending_input() -> bool {
     // 2. Process all pending PS/2 keyboard scancodes
     let mut kbd_chars: alloc::vec::Vec<char> = alloc::vec::Vec::new();
     while let Some(code) = pop_scancode() {
+        // Raw key events for /dev/input/event0 (what X's evdev driver reads).
+        crate::drivers::evdev::feed_scancode(code);
         let mut keyboard_lock = KEYBOARD.lock();
         if let Some(ref mut keyboard) = *keyboard_lock {
             if let Ok(Some(key_event)) = keyboard.add_byte(code) {
@@ -813,7 +798,26 @@ pub fn process_pending_input() -> bool {
                         DecodedKey::Unicode(character) => {
                             kbd_chars.push(character);
                         }
-                        DecodedKey::RawKey(_) => {}
+                        DecodedKey::RawKey(code) => {
+                            // Cursor/edit keys reach userspace as VT100 escape sequences.
+                            if userspace_tty() {
+                                use pc_keyboard::KeyCode;
+                                let seq = match code {
+                                    KeyCode::ArrowUp => "\x1b[A",
+                                    KeyCode::ArrowDown => "\x1b[B",
+                                    KeyCode::ArrowRight => "\x1b[C",
+                                    KeyCode::ArrowLeft => "\x1b[D",
+                                    KeyCode::Home => "\x1b[H",
+                                    KeyCode::End => "\x1b[F",
+                                    KeyCode::Delete => "\x1b[3~",
+                                    KeyCode::Insert => "\x1b[2~",
+                                    KeyCode::PageUp => "\x1b[5~",
+                                    KeyCode::PageDown => "\x1b[6~",
+                                    _ => "",
+                                };
+                                kbd_chars.extend(seq.chars());
+                            }
+                        }
                     }
                 }
             }
@@ -821,7 +825,10 @@ pub fn process_pending_input() -> bool {
     }
     if !kbd_chars.is_empty() {
         processed = true;
-        handle_chars(&kbd_chars);
+        // While a program (X) owns the screen the keyboard belongs to it, not to the tty.
+        if !crate::display::console::graphics_mode() {
+            handle_chars(&kbd_chars);
+        }
     }
 
     // 3. Process all pending COM1 Serial RX bytes
@@ -843,7 +850,7 @@ pub fn process_pending_input() -> bool {
             }
             other => {
                 LAST_WAS_CR.store(false, core::sync::atomic::Ordering::Relaxed);
-                if other >= 32 && other <= 126 {
+                if (other >= 32 && other <= 126) || (userspace_tty() && other < 128) {
                     serial_chars.push(other as char);
                 }
             }

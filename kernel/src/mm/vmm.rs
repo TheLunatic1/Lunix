@@ -6,6 +6,10 @@ use x86_64::{PhysAddr, VirtAddr};
 
 pub static KERNEL_PML4_PHYS: AtomicU64 = AtomicU64::new(0);
 
+/// Lowest physical address the frame allocator hands out. Below it lies the kernel's
+/// identity-mapped low memory, which user page tables merely alias.
+const USER_FRAME_MIN: u64 = 0x200_0000;
+
 pub fn init(_phys_mem_offset: u64) {
     let (uefi_l4_frame, flags) = Cr3::read();
     let uefi_virt = VirtAddr::new(uefi_l4_frame.start_address().as_u64());
@@ -174,6 +178,8 @@ pub fn get_page_phys_in_pml4(pml4_phys: PhysAddr, virt_addr: VirtAddr) -> Option
 
 pub fn create_process_pml4() -> Result<PhysFrame<Size4KiB>, &'static str> {
     let proc_pml4_frame = pmm::alloc_frame().ok_or("OOM for process PML4")?;
+    // A fresh address space has no demand-paged areas (the frame may be a reused one).
+    crate::mm::vma::reset(proc_pml4_frame.as_u64());
     unsafe {
         core::ptr::write_bytes(proc_pml4_frame.as_u64() as *mut u8, 0, 4096);
     }
@@ -313,16 +319,21 @@ pub fn clone_process_pml4(parent_pml4_phys: PhysAddr) -> Result<PhysFrame<Size4K
                     let flags = pt[p1_idx].flags();
                     if flags.contains(PageTableFlags::USER_ACCESSIBLE) && flags.contains(PageTableFlags::PRESENT) {
                         let parent_page_phys = pt[p1_idx].addr();
-                        let new_frame = pmm::alloc_frame().ok_or("OOM cloning user page frame")?;
-
-                        // Copy 4 KiB contents from parent page to child page
-                        unsafe {
-                            core::ptr::copy_nonoverlapping(
-                                parent_page_phys.as_u64() as *const u8,
-                                new_frame.as_u64() as *mut u8,
-                                4096,
-                            );
+                        // Copy-on-write: RAM pages are shared read-only between parent and
+                        // child and copied on the first write. Device memory (framebuffer,
+                        // MMIO) is shared as is.
+                        let mut child_flags = flags;
+                        if parent_page_phys.as_u64() >= USER_FRAME_MIN && pmm::is_ram(parent_page_phys.as_u64()) {
+                            if flags.contains(PageTableFlags::WRITABLE) || flags.contains(crate::mm::cow::COW_BIT) {
+                                child_flags = (flags - PageTableFlags::WRITABLE) | crate::mm::cow::COW_BIT;
+                                // Parent's PTE: same physical page, now read-only + COW.
+                                let pt_mut = pt_phys.as_u64() as *mut PageTable;
+                                unsafe { (&mut *pt_mut)[p1_idx].set_flags(child_flags) };
+                            }
+                            crate::mm::cow::share(parent_page_phys.as_u64());
                         }
+                        let new_frame = parent_page_phys;
+                        let flags = child_flags;
 
                         // Compute canonical virtual address
                         let mut vaddr_u64 = ((p4_idx as u64) << 39)
@@ -341,7 +352,58 @@ pub fn clone_process_pml4(parent_pml4_phys: PhysAddr) -> Result<PhysFrame<Size4K
         }
     }
 
+    // The parent's PTEs were downgraded to read-only: drop stale writable TLB entries.
+    let (cur, cr3_flags) = Cr3::read();
+    unsafe { Cr3::write(cur, cr3_flags) };
+
     Ok(child_pml4_frame)
+}
+
+/// Release every user page of an address space that is no longer in use: private RAM
+/// frames go back to the allocator (shared copy-on-write frames just lose one reference);
+/// device memory such as the framebuffer is left alone. The address space's page tables
+/// themselves are small and are not reclaimed here.
+pub fn free_user_frames(pml4_phys: PhysAddr) {
+    let pml4 = unsafe { &*(pml4_phys.as_u64() as *const PageTable) };
+    for p4_idx in 0..256 {
+        if pml4[p4_idx].is_unused() {
+            continue;
+        }
+        let pdpt = unsafe { &*(pml4[p4_idx].addr().as_u64() as *const PageTable) };
+        for p3_idx in 0..512 {
+            if pdpt[p3_idx].is_unused() || (p4_idx == 0 && (1..4).contains(&p3_idx)) {
+                continue;
+            }
+            let pd = unsafe { &*(pdpt[p3_idx].addr().as_u64() as *const PageTable) };
+            for p2_idx in 0..512 {
+                if pd[p2_idx].is_unused()
+                    || pd[p2_idx].flags().contains(PageTableFlags::HUGE_PAGE)
+                    || (p4_idx == 0 && p3_idx == 0 && p2_idx >= 16)
+                {
+                    continue;
+                }
+                let pt_ptr = pd[p2_idx].addr().as_u64() as *mut PageTable;
+                for p1_idx in 0..512 {
+                    if p4_idx == 0 && p3_idx == 0 && p2_idx == 0 && p1_idx < 16 {
+                        continue;
+                    }
+                    let pt = unsafe { &mut *pt_ptr };
+                    let flags = pt[p1_idx].flags();
+                    if !flags.contains(PageTableFlags::PRESENT) || !flags.contains(PageTableFlags::USER_ACCESSIBLE) {
+                        continue;
+                    }
+                    let phys = pt[p1_idx].addr().as_u64();
+                    pt[p1_idx].set_unused();
+                    // Only frames the allocator handed out (it never gives out anything below
+                    // 32 MiB): the low identity-mapped pages of the kernel are not ours to free.
+                    if phys >= USER_FRAME_MIN && pmm::is_ram(phys) && crate::mm::cow::drop_ref(phys) {
+                        pmm::free_frame(PhysAddr::new(phys));
+                    }
+                }
+            }
+        }
+    }
+    crate::mm::vma::reset(pml4_phys.as_u64());
 }
 
 pub fn is_page_mapped(virt_addr: VirtAddr) -> bool {

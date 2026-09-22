@@ -23,6 +23,19 @@ pub trait FileHandle: Send + Sync {
     fn write(&mut self, buf: &[u8]) -> Result<usize, &'static str>;
     fn seek(&mut self, pos: SeekFrom) -> Result<u64, &'static str>;
     fn size(&self) -> u64;
+
+    /// Non-blocking read (`O_NONBLOCK`). Devices that can run dry return `Err("EAGAIN")`.
+    fn read_nonblock(&mut self, buf: &mut [u8]) -> Result<usize, &'static str> {
+        self.read(buf)
+    }
+    /// Would a `read` return without blocking (`POLLIN`)?
+    fn poll_readable(&self) -> bool {
+        true
+    }
+    /// Device-specific `ioctl`. `None` = not handled here.
+    fn ioctl(&mut self, _req: u64, _arg: u64) -> Option<isize> {
+        None
+    }
 }
 
 pub struct MemoryFile {

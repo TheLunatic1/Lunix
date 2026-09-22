@@ -57,6 +57,25 @@ pub fn notify_eoi(_irq: u8) {
     crate::arch::x86_64::apic::lapic::eoi();
 }
 
+/// End of a fatal CPU exception. If it happened in user mode only that process dies (as
+/// SIGSEGV/SIGILL/SIGFPE would, exit status 128 + signal); a fault inside the kernel is a
+/// kernel bug and halts the machine.
+fn fatal_or_kill_user(stack_frame: &InterruptStackFrame, signal: i32) -> ! {
+    if stack_frame.code_segment.rpl() == x86_64::PrivilegeLevel::Ring3 {
+        let name = crate::task::scheduler::get_current_process()
+            .and_then(|p| p.try_lock().map(|g| g.name.clone()))
+            .unwrap_or_default();
+        crate::arch::x86_64::serial::write_str("  [FAULT] terminating faulting process: ");
+        crate::arch::x86_64::serial::write_str(&name);
+        crate::arch::x86_64::serial::write_str("\n");
+        // The process is dying: reuse the normal exit path (closes fds, frees memory,
+        // wakes its parent, schedules another thread).
+        x86_64::instructions::interrupts::enable();
+        crate::syscall::sys_exit(128 + signal)
+    }
+    crate::arch::x86_64::hlt_loop()
+}
+
 extern "x86-interrupt" fn divide_error_handler(stack_frame: InterruptStackFrame) {
     use crate::arch::x86_64::serial::{write_hex, write_str};
     write_str("\n[EXCEPTION] DIVIDE BY ZERO, RIP: ");
@@ -64,7 +83,7 @@ extern "x86-interrupt" fn divide_error_handler(stack_frame: InterruptStackFrame)
     write_str(", RSP: ");
     write_hex(stack_frame.stack_pointer.as_u64());
     write_str("\n");
-    crate::arch::x86_64::hlt_loop()
+    fatal_or_kill_user(&stack_frame, 8)
 }
 
 extern "x86-interrupt" fn breakpoint_handler(stack_frame: InterruptStackFrame) {
@@ -81,7 +100,7 @@ extern "x86-interrupt" fn invalid_opcode_handler(stack_frame: InterruptStackFram
     write_str(", RSP: ");
     write_hex(stack_frame.stack_pointer.as_u64());
     write_str("\n");
-    crate::arch::x86_64::hlt_loop()
+    fatal_or_kill_user(&stack_frame, 4)
 }
 
 extern "x86-interrupt" fn general_protection_fault_handler(
@@ -98,7 +117,7 @@ extern "x86-interrupt" fn general_protection_fault_handler(
     write_str(", RFLAGS: ");
     write_hex(stack_frame.cpu_flags.bits());
     write_str("\n");
-    crate::arch::x86_64::hlt_loop()
+    fatal_or_kill_user(&stack_frame, 11)
 }
 
 extern "x86-interrupt" fn page_fault_handler(
@@ -110,6 +129,19 @@ extern "x86-interrupt" fn page_fault_handler(
     use x86_64::structures::paging::PageTable;
 
     let fault_addr = Cr2::read().map(|a| a.as_u64()).unwrap_or(0);
+
+    // Demand paging: a not-present fault inside an mmap'd area is filled in and retried.
+    if !error_code.contains(PageFaultErrorCode::PROTECTION_VIOLATION) && crate::mm::vma::handle_fault(fault_addr) {
+        return;
+    }
+    // Copy-on-write: a write to a shared (fork) page gets a private copy and is retried.
+    if error_code.contains(PageFaultErrorCode::PROTECTION_VIOLATION)
+        && error_code.contains(PageFaultErrorCode::CAUSED_BY_WRITE)
+        && crate::mm::cow::handle_write_fault(fault_addr)
+    {
+        return;
+    }
+
     write_str("\n[EXCEPTION] PAGE FAULT, CR2 (Fault Addr): ");
     write_hex(fault_addr);
     write_str(", Error Code: ");
@@ -171,7 +203,7 @@ extern "x86-interrupt" fn page_fault_handler(
         }
     }
 
-    crate::arch::x86_64::hlt_loop()
+    fatal_or_kill_user(&stack_frame, 11)
 }
 
 extern "x86-interrupt" fn double_fault_handler(
@@ -188,10 +220,15 @@ extern "x86-interrupt" fn double_fault_handler(
 }
 
 extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFrame) {
+    // Acknowledge first. on_tick() may call schedule() and switch to a thread that never
+    // returns through this handler (a freshly forked process, say); an EOI sent after
+    // that would be skipped, leaving the timer vector "in service" and stopping all
+    // further ticks (no more preemption). Interrupts stay disabled until the switched-to
+    // context restores its own flags, so this cannot nest.
+    notify_eoi(InterruptIndex::Timer.as_u8());
     crate::arch::x86_64::serial::poll_hardware();
     crate::drivers::keyboard::poll_ps2_hardware();
     crate::drivers::timer::on_tick();
-    notify_eoi(InterruptIndex::Timer.as_u8());
 }
 
 extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStackFrame) {

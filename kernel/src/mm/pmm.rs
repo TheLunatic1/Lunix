@@ -68,9 +68,56 @@ impl PhysicalMemoryManager {
         let frame_idx = (addr.as_u64() / PAGE_SIZE) as usize;
         self.set_frame_free(frame_idx);
     }
+
+    /// Allocate `n` physically-contiguous frames (e.g. for a DMA ring that a device's PFN
+    /// register addresses as one region). Unlike `alloc_frame()`, which only guarantees a
+    /// single free frame, this scans for a run of `n` consecutive free indices.
+    pub fn alloc_frames_contig(&mut self, n: usize) -> Option<PhysAddr> {
+        if n == 0 {
+            return None;
+        }
+        let mut run_start = 0usize;
+        let mut run_len = 0usize;
+        for idx in 0..BITMAP_SIZE {
+            let word = self.bitmap[idx];
+            if word == !0u64 {
+                run_len = 0;
+                continue;
+            }
+            for bit in 0..64 {
+                let frame_idx = idx * 64 + bit;
+                if (word & (1 << bit)) == 0 {
+                    if run_len == 0 {
+                        run_start = frame_idx;
+                    }
+                    run_len += 1;
+                    if run_len == n {
+                        for f in run_start..run_start + n {
+                            self.set_frame_used(f);
+                        }
+                        return Some(PhysAddr::new((run_start as u64) * PAGE_SIZE));
+                    }
+                } else {
+                    run_len = 0;
+                }
+            }
+        }
+        None
+    }
 }
 
 pub static PMM: Mutex<PhysicalMemoryManager> = Mutex::new(PhysicalMemoryManager::new());
+
+/// Usable RAM ranges (start, end) from the firmware memory map. Anything outside them
+/// (framebuffer, PCI BARs, ...) is device memory and must never be copied or freed.
+const MAX_RAM_REGIONS: usize = 128;
+static RAM_REGIONS: Mutex<([(u64, u64); MAX_RAM_REGIONS], usize)> = Mutex::new(([(0, 0); MAX_RAM_REGIONS], 0));
+
+/// True if `phys` lies in usable system RAM.
+pub fn is_ram(phys: u64) -> bool {
+    let g = RAM_REGIONS.lock();
+    g.0[..g.1].iter().any(|&(s, e)| phys >= s && phys < e)
+}
 static TOTAL_MEMORY_BYTES: AtomicUsize = AtomicUsize::new(0);
 static USABLE_MEMORY_BYTES: AtomicUsize = AtomicUsize::new(0);
 
@@ -93,6 +140,14 @@ pub fn init(boot_info: &BootInfo) {
 
         if region.region_type == MemoryRegionType::Usable {
             total_usable += region.byte_size();
+            {
+                let mut g = RAM_REGIONS.lock();
+                let n = g.1;
+                if n < MAX_RAM_REGIONS {
+                    g.0[n] = (region.phys_start, region.phys_start + region.byte_size());
+                    g.1 = n + 1;
+                }
+            }
 
             let start_frame = (region.phys_start / PAGE_SIZE) as usize;
             let end_frame = ((region.phys_start + region.byte_size()) / PAGE_SIZE) as usize;
@@ -149,6 +204,19 @@ pub fn alloc_frame() -> Option<PhysAddr> {
 
 pub fn free_frame(addr: PhysAddr) {
     PMM.lock().free_frame(addr);
+}
+
+/// See `PhysicalMemoryManager::alloc_frames_contig`.
+pub fn alloc_frames_contig(n: usize) -> Option<PhysAddr> {
+    PMM.lock().alloc_frames_contig(n)
+}
+
+/// Free `n` consecutive frames starting at `addr` (the counterpart to `alloc_frames_contig`).
+pub fn free_frames_contig(addr: PhysAddr, n: usize) {
+    let mut pmm = PMM.lock();
+    for i in 0..n {
+        pmm.free_frame(PhysAddr::new(addr.as_u64() + (i as u64) * PAGE_SIZE));
+    }
 }
 
 pub fn get_memory_stats() -> (usize, usize, usize) {

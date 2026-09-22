@@ -41,7 +41,7 @@ impl AtaDevice {
     }
 
     fn wait_bsy(&self) -> Result<(), &'static str> {
-        for _ in 0..100_000 {
+        for _ in 0..50_000_000 {
             let status = unsafe { inb(self.io_base + 7) };
             if (status & ATA_STATUS_BSY) == 0 {
                 return Ok(());
@@ -51,7 +51,7 @@ impl AtaDevice {
     }
 
     fn wait_drq(&self) -> Result<(), &'static str> {
-        for _ in 0..100_000 {
+        for _ in 0..50_000_000 {
             let status = unsafe { inb(self.io_base + 7) };
             if (status & ATA_STATUS_ERR) != 0 {
                 return Err("ATA Error status set");
@@ -148,6 +148,42 @@ impl AtaDevice {
         }
     }
 
+    /// Read `n` (1..=256) consecutive sectors with a single command.
+    fn read_run_internal(&self, lba: u64, n: usize, buf: &mut [u8]) -> Result<(), &'static str> {
+        debug_assert!(n >= 1 && n <= 256 && buf.len() >= n * 512);
+        unsafe {
+            self.wait_bsy()?;
+            let drive_head = 0xE0 | (if self.is_slave { 0x10 } else { 0 }) | (((lba >> 24) & 0x0F) as u8);
+            outb(self.io_base + 6, drive_head);
+            outb(self.io_base + 2, if n == 256 { 0 } else { n as u8 });
+            outb(self.io_base + 3, (lba & 0xFF) as u8);
+            outb(self.io_base + 4, ((lba >> 8) & 0xFF) as u8);
+            outb(self.io_base + 5, ((lba >> 16) & 0xFF) as u8);
+            outb(self.io_base + 7, ATA_CMD_READ_SECTORS);
+
+            for sector in 0..n {
+                // ATA requires ~400 ns after the command / previous sector before the status
+                // register is valid: DRQ still shows the previous sector until BSY is set.
+                for _ in 0..4 {
+                    inb(self.ctrl_base);
+                }
+                self.wait_bsy()?;
+                self.wait_drq()?;
+                // One bulk `rep insw` per sector (256 words) instead of 256 port reads.
+                let dst = buf.as_mut_ptr().add(sector * 512);
+                core::arch::asm!(
+                    "cld",
+                    "rep insw",
+                    in("dx") self.io_base,
+                    inout("rdi") dst => _,
+                    inout("rcx") 256usize => _,
+                    options(nostack, preserves_flags)
+                );
+            }
+            Ok(())
+        }
+    }
+
     fn write_sector_internal(&self, lba: u64, buf: &[u8]) -> Result<(), &'static str> {
         if buf.len() < 512 {
             return Err("Buffer too small for 512-byte sector");
@@ -199,10 +235,12 @@ impl BlockDevice for AtaDevice {
             return Err("Destination buffer too small");
         }
 
-        for i in 0..count {
-            let offset = i * 512;
-            let sector_slice = &mut buf[offset..offset + 512];
-            self.read_sector_internal(start_block + i as u64, sector_slice)?;
+        // One READ SECTORS command per run of up to 256 sectors.
+        let mut done = 0usize;
+        while done < count {
+            let n = (count - done).min(256);
+            self.read_run_internal(start_block + done as u64, n, &mut buf[done * 512..(done + n) * 512])?;
+            done += n;
         }
         Ok(())
     }

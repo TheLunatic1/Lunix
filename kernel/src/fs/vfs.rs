@@ -24,6 +24,14 @@ pub trait FileSystem: Send + Sync {
     fn open(&self, path: &str) -> Result<Box<dyn FileHandle>, VfsError>;
     fn read_dir(&self, path: &str) -> Result<Vec<DirectoryEntry>, VfsError>;
     fn stat(&self, path: &str) -> Result<INode, VfsError>;
+    /// Like `stat` but does not follow a final symlink. Filesystems without symlinks
+    /// need not override this.
+    fn lstat(&self, path: &str) -> Result<INode, VfsError> {
+        self.stat(path)
+    }
+    fn readlink(&self, _path: &str) -> Result<String, VfsError> {
+        Err(VfsError::UnsupportedOperation)
+    }
 }
 
 struct VfsMount {
@@ -76,31 +84,35 @@ fn resolve_mount<'a>(mounts: &'a [VfsMount], path: &str) -> Option<(&'a Arc<dyn 
     }
 }
 
-pub fn open(path: &str) -> Result<Box<dyn FileHandle>, VfsError> {
+fn with_mount<T>(path: &str, f: impl FnOnce(&Arc<dyn FileSystem>, &str) -> Result<T, VfsError>) -> Result<T, VfsError> {
     let mounts = VFS_MOUNTS.lock();
-    if let Some((fs, rel_path)) = resolve_mount(&mounts, path) {
-        fs.open(&rel_path)
-    } else {
-        Err(VfsError::NotFound)
+    match resolve_mount(&mounts, path) {
+        Some((fs, rel_path)) => f(fs, &rel_path),
+        None => Err(VfsError::NotFound),
     }
+}
+
+pub fn open(path: &str) -> Result<Box<dyn FileHandle>, VfsError> {
+    with_mount(path, |fs, p| fs.open(p))
 }
 
 pub fn read_dir(path: &str) -> Result<Vec<DirectoryEntry>, VfsError> {
-    let mounts = VFS_MOUNTS.lock();
-    if let Some((fs, rel_path)) = resolve_mount(&mounts, path) {
-        fs.read_dir(&rel_path)
-    } else {
-        Err(VfsError::NotFound)
-    }
+    with_mount(path, |fs, p| fs.read_dir(p))
 }
 
+/// `stat(2)`: follows symlinks.
 pub fn stat(path: &str) -> Result<INode, VfsError> {
-    let mounts = VFS_MOUNTS.lock();
-    if let Some((fs, rel_path)) = resolve_mount(&mounts, path) {
-        fs.stat(&rel_path)
-    } else {
-        Err(VfsError::NotFound)
-    }
+    with_mount(path, |fs, p| fs.stat(p))
+}
+
+/// `lstat(2)`: does not follow a symlink in the final component.
+pub fn lstat(path: &str) -> Result<INode, VfsError> {
+    with_mount(path, |fs, p| fs.lstat(p))
+}
+
+/// `readlink(2)`: the target of the symlink at `path`.
+pub fn readlink(path: &str) -> Result<String, VfsError> {
+    with_mount(path, |fs, p| fs.readlink(p))
 }
 
 pub fn read_to_vec(path: &str) -> Result<Vec<u8>, VfsError> {

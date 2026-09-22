@@ -150,6 +150,9 @@ pub fn on_interrupt() {
 
             MOUSE_X.store(new_x, Ordering::Relaxed);
             MOUSE_Y.store(new_y, Ordering::Relaxed);
+
+            // Relative motion and buttons for /dev/input/event1.
+            crate::drivers::evdev::mouse_packet(dx as i32, dy as i32, buttons);
         }
         _ => *cycle = 0,
     }

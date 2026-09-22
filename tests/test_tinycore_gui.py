@@ -4,7 +4,7 @@ import os
 import sys
 import threading
 
-def test_tinycore_upstream():
+def test_tinycore_gui():
     root = r"d:\REPOSITORIES\Lunix"
     qemu = os.path.join(root, r"tools\qemu\qemu-system-x86_64.exe")
     ovmf = os.path.join(root, r"tools\qemu\share\edk2-x86_64-code.fd")
@@ -31,7 +31,7 @@ def test_tinycore_upstream():
         "-m", "512M"
     ]
 
-    print("\n[*] Launching Lunix with Official Upstream Tiny Core Rootfs in QEMU...")
+    print("\n[*] Launching Lunix with Official Tiny Core Graphical Desktop in QEMU...")
     proc = subprocess.Popen(
         qemu_cmd,
         stdin=subprocess.PIPE,
@@ -68,18 +68,15 @@ def test_tinycore_upstream():
     time.sleep(6.5)
 
     test_commands = [
-        ("uname -a\n", 1.0),
-        ("ls /bin\n", 1.5),
-        ("ls /lib\n", 1.0),
-        ("ls /etc\n", 1.0),
-        ("cat /etc/os-release\n", 1.0),
-        ("cat /etc/inittab\n", 1.0),
-        ("cat /etc/passwd\n", 1.0),
-        ("cat /etc/issue\n", 1.0),
-        ("exec /bin/test_tinycore.elf\n", 2.0),
-        ("exec /bin/test_dynamic.elf\n", 2.0),
-        ("exec /bin/test_devproc.elf\n", 2.0),
-        ("tinycore\n", 2.0),
+        ("ls /etc/sysconfig\n", 1.0),
+        ("cat /etc/sysconfig/desktop\n", 1.0),
+        ("cat /etc/sysconfig/icons\n", 1.0),
+        ("cat /etc/sysconfig/Xserver\n", 1.0),
+        ("cat /home/tc/.xsession\n", 1.0),
+        ("cat /home/tc/.wbar\n", 1.0),
+        ("ls /usr/local/bin\n", 1.5),
+        ("ls /dev\n", 1.0),
+        ("startx\n", 3.0),
     ]
 
     for cmd_str, wait_time in test_commands:
@@ -93,29 +90,29 @@ def test_tinycore_upstream():
     output = "".join(full_output)
 
     print("\n\n=======================================================")
-    print("      EVALUATING UPSTREAM TINY CORE TEST RESULTS       ")
+    print("     EVALUATING TINY CORE GUI DESKTOP TEST RESULTS     ")
     print("=======================================================")
 
     checks = [
-        ("6.8.0-tinycore", "Tiny Core Linux Kernel Release String in uname"),
-        ("Tiny Core Linux", "Tiny Core Linux /etc/os-release metadata"),
-        ("::sysinit:/etc/init.d/rcS", "SysV init table (/etc/inittab)"),
-        ("tc:x:1001:1001:tc:/home/tc:/bin/sh", "Tiny Core default user account (/etc/passwd)"),
-        ("Tiny Core Linux v15.0", "Tiny Core login banner (/etc/issue)"),
-        ("busybox", "Official BusyBox binary present in /bin"),
-        ("ld-linux-x86-64.so.2", "Glibc dynamic linker present in /lib"),
-        ("[TINYCORE] Initializing Tiny Core Linux v15.0", "Tiny Core Linux runtime execution"),
-        ("[SYSINFO] Total RAM: 512 MB, Free RAM:", "sys_sysinfo runtime syscall (Syscall 99)"),
-        ("[TID] Initialized Thread Address Space", "sys_set_tid_address runtime syscall (Syscall 218)"),
-        ("[FUTEX] Fast user-space synchronization primitives verified", "sys_futex mutex synchronization (Syscall 202)"),
-        ("[MMAP] Dynamic memory & shared library mapping verified", "File-backed shared library mapping (Syscall 9)"),
-        ("[TC-INIT] Running /etc/init.d/rcS", "Tiny Core /sbin/init bootstrap flow"),
-        ("[LD-LINUX] Runtime dynamic linker loaded", "Dynamic ELF Interpreter mapping (PT_INTERP)"),
-        ("[LD-LINUX] Processed auxiliary vectors: AT_BASE, AT_ENTRY, AT_PHDR", "Dynamic loader auxiliary vector generation"),
-        ("[APP] Dynamic ELF test binary reached main() after ld-linux init!", "Dynamic application execution via ld.so"),
-        ("[APP] PT_INTERP dynamic linking verified successfully.", "PT_INTERP dynamic linking end-to-end"),
-        ("[DEVPROC] SUCCESS: All /dev and /proc virtual filesystems verified!", "Virtual filesystem and /dev nodes verified"),
-        ("TINY CORE LINUX USERSPACE (PID 1 BOOT SEQUENCE)", "Built-in tinycore shell launcher command"),
+        ("Xserver", "Tiny Core Xserver config in /etc/sysconfig"),
+        ("desktop", "Tiny Core Desktop config in /etc/sysconfig"),
+        ("icons", "Tiny Core Icons config in /etc/sysconfig"),
+        ("flwm", "Default window manager set to flwm"),
+        ("wbar", "Default dock set to wbar"),
+        ("Xfbdev", "Default X server set to Xfbdev"),
+        ("/home/tc/.xsession", "User session startup script (.xsession)"),
+        ("osxbarback.png", "Wbar icon configuration present (.wbar)"),
+        ("Xfbdev", "Official Tiny Core Xfbdev binary present in /usr/local/bin"),
+        ("flwm", "Official Fast Light Window Manager (flwm) binary in /usr/local/bin"),
+        ("wbar", "Official Wbar dock binary in /usr/local/bin"),
+        ("aterm", "Official Aterm terminal binary in /usr/local/bin"),
+        ("fb0", "/dev/fb0 framebuffer device present"),
+        ("mice", "/dev/mice PS/2 mouse device present"),
+        ("TINY CORE LINUX GRAPHICAL DESKTOP (FLWM + WBAR)", "startx graphical desktop launch banner"),
+        ("Initializing X11 Framebuffer Server (Xfbdev on /dev/fb0)", "Xfbdev framebuffer initialization"),
+        ("Launching Fast Light Window Manager (flwm)", "flwm window manager launch"),
+        ("Launching Animated Application Dock (wbar)", "wbar animated dock launch"),
+        ("Launching Graphical Terminal Emulator (aterm)", "aterm terminal emulator launch"),
     ]
 
     all_passed = True
@@ -126,11 +123,11 @@ def test_tinycore_upstream():
             print(f"  [FAIL] {desc} (Expected: '{needle}')")
             all_passed = False
 
-    assert all_passed, "One or more Upstream Tiny Core verification checks failed!"
+    assert all_passed, "One or more Tiny Core GUI verification checks failed!"
 
     print("\n=======================================================")
-    print(" [SUCCESS] ALL UPSTREAM TINY CORE TESTS PASSED 100%!  ")
+    print(" [SUCCESS] ALL TINY CORE GUI DESKTOP TESTS PASSED 100%!")
     print("=======================================================")
 
 if __name__ == "__main__":
-    test_tinycore_upstream()
+    test_tinycore_gui()

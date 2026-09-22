@@ -1,9 +1,12 @@
+pub mod evdev;
 pub mod keyboard;
 pub mod mouse;
 pub mod net;
 pub mod pci;
+pub mod pty;
 pub mod storage;
 pub mod timer;
+pub mod tty;
 pub mod virtio;
 
 pub fn init() {

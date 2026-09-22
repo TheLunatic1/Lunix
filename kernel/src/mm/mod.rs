@@ -1,5 +1,7 @@
+pub mod cow;
 pub mod heap;
 pub mod pmm;
+pub mod vma;
 pub mod vmm;
 
 use lunix_common::BootInfo;

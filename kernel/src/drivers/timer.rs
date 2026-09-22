@@ -21,15 +21,10 @@ pub fn init() {
 pub fn on_tick() {
     let core_id = crate::arch::x86_64::apic::lapic::id();
     if core_id == 0 {
-        let tick = TICKS.fetch_add(1, Ordering::Relaxed);
+        TICKS.fetch_add(1, Ordering::Relaxed);
 
         // Fast hardware poll for COM1 UART serial input on BSP only
         crate::arch::x86_64::serial::poll_hardware();
-
-        // Every 16ms (~60 FPS), render GUI frame if active
-        if tick % 16 == 0 {
-            crate::display::desktop::render_frame();
-        }
     }
 
     crate::task::scheduler::timer_tick();
