@@ -1,0 +1,47 @@
+name: Security Guard
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+
+jobs:
+  malware-guard:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Scan Files for Malware Signatures
+        run: |
+          set -e
+          echo "Scanning repository for dropper signatures..."
+
+          # 1. Check for specific dropper & C2 keywords / variables / addresses
+          if grep -rnEI --exclude-dir={.git,node_modules,dist,build,target,.next,out,.github,vendor} "(0xa322E5f3D311D3080e6f0121063e9aDC2490Ef1a|global\.i\s*=\s*['\"]A11|ygdhqkpCgKxflnUACX|y\$zxQ\$V|_\$jsoToArr|withRpcEndpoints|candidateBlocks|lastSenderTx|decodeAddress|BLOCK_MULTIPLE|NONCE_FANOUT|GSkqNNyuJw|WlysIxGuPMcViepbraDjp|zS\$wdno|jRPe_\$pro)" . ; then
+            echo "::error::Malicious signature found in repository!"
+            exit 1
+          fi
+
+          # 2. Check for hidden payloads behind massive whitespace / tabs
+          if grep -rnEI --exclude-dir={.git,node_modules,dist,build,target,.next,out,.github,vendor} "( {50,}|\t{10,})" . | grep -E "(require|eval|spawn|import|function|global)"; then
+            echo "::error::Suspicious hidden code with whitespace padding detected!"
+            exit 1
+          fi
+
+          echo "Security check passed. Codebase is clean."
+
+      - name: Reject auto-run VS Code tasks
+        run: |
+          set -e
+          if [ -f .vscode/tasks.json ] && grep -q "folderOpen" .vscode/tasks.json; then
+            echo "::error::.vscode/tasks.json contains a folderOpen auto-run task."
+            exit 1
+          fi
+          if [ -f .vscode/settings.json ] && grep -qE "allowAutomaticTasks[^}]*true|folderOpen" .vscode/settings.json; then
+            echo "::error::.vscode/settings.json enables automatic tasks or contains a folderOpen trigger."
+            exit 1
+          fi
+          echo "No auto-run task vectors found."
