@@ -63,9 +63,12 @@ pub struct UnixSocket {
     pub path: Option<String>,
     pub state: UnixSocketState,
     pub flags: u32,
+<<<<<<< HEAD
     /// File descriptors (across all processes) that refer to this socket. When the last one
     /// closes, the peer sees end-of-file / EPIPE.
     pub open_fds: usize,
+=======
+>>>>>>> 67740566240f8bc3cf3fa1dbde7456fa0a3e6ea6
 }
 
 impl UnixSocket {
@@ -79,7 +82,10 @@ impl UnixSocket {
             path: None,
             state: UnixSocketState::Unbound,
             flags: 0,
+<<<<<<< HEAD
             open_fds: 1,
+=======
+>>>>>>> 67740566240f8bc3cf3fa1dbde7456fa0a3e6ea6
         }))
     }
 
@@ -147,7 +153,10 @@ impl UnixSocket {
                         tx_buffer: s2c.clone(), // Server writes to client
                     },
                     flags: 0,
+<<<<<<< HEAD
                     open_fds: 1,
+=======
+>>>>>>> 67740566240f8bc3cf3fa1dbde7456fa0a3e6ea6
                 }));
 
                 pending_queue.push(server_peer.clone());
@@ -187,6 +196,7 @@ impl UnixSocket {
         }
     }
 
+<<<<<<< HEAD
     /// One descriptor for this socket was closed. The last close hangs up the connection.
     pub fn close_one(&mut self) {
         self.open_fds = self.open_fds.saturating_sub(1);
@@ -198,13 +208,19 @@ impl UnixSocket {
         }
     }
 
+=======
+>>>>>>> 67740566240f8bc3cf3fa1dbde7456fa0a3e6ea6
     pub fn read(&self, buf: &mut [u8], non_blocking: bool) -> isize {
         if buf.is_empty() {
             return 0;
         }
 
         if let UnixSocketState::Connected { ref rx_buffer, .. } = self.state {
+<<<<<<< HEAD
             loop {
+=======
+            for _ in 0..50 {
+>>>>>>> 67740566240f8bc3cf3fa1dbde7456fa0a3e6ea6
                 let res = {
                     let mut pipe = rx_buffer.lock();
                     pipe.read(buf, non_blocking)
@@ -215,12 +231,20 @@ impl UnixSocket {
                         if non_blocking {
                             return -11; // -EAGAIN
                         }
+<<<<<<< HEAD
                         crate::task::scheduler::sleep_ms(1);
+=======
+                        crate::task::scheduler::sleep_ms(2);
+>>>>>>> 67740566240f8bc3cf3fa1dbde7456fa0a3e6ea6
                     }
                     Err(PipeError::BrokenPipe) => return 0, // EOF
                     Err(_) => return -5, // -EIO
                 }
             }
+<<<<<<< HEAD
+=======
+            if non_blocking { -11 } else { 0 }
+>>>>>>> 67740566240f8bc3cf3fa1dbde7456fa0a3e6ea6
         } else {
             -107 // -ENOTCONN
         }
@@ -232,7 +256,11 @@ impl UnixSocket {
         }
 
         if let UnixSocketState::Connected { ref tx_buffer, .. } = self.state {
+<<<<<<< HEAD
             loop {
+=======
+            for _ in 0..50 {
+>>>>>>> 67740566240f8bc3cf3fa1dbde7456fa0a3e6ea6
                 let res = {
                     let mut pipe = tx_buffer.lock();
                     pipe.write(buf, non_blocking)
@@ -243,11 +271,19 @@ impl UnixSocket {
                         if non_blocking {
                             return -11; // -EAGAIN
                         }
+<<<<<<< HEAD
                         crate::task::scheduler::sleep_ms(1);
+=======
+                        crate::task::scheduler::sleep_ms(2);
+>>>>>>> 67740566240f8bc3cf3fa1dbde7456fa0a3e6ea6
                     }
                     Err(PipeError::BrokenPipe) => return -32, // -EPIPE
                 }
             }
+<<<<<<< HEAD
+=======
+            -11 // -EAGAIN
+>>>>>>> 67740566240f8bc3cf3fa1dbde7456fa0a3e6ea6
         } else {
             -107 // -ENOTCONN
         }
@@ -258,8 +294,12 @@ impl UnixSocket {
             UnixSocketState::Listening { ref pending_queue, .. } => !pending_queue.is_empty(),
             UnixSocketState::Connected { ref rx_buffer, .. } => {
                 let pipe = rx_buffer.lock();
+<<<<<<< HEAD
                 // Readable when data is waiting, or when the peer hung up (read returns 0).
                 pipe.available_to_read() > 0 || pipe.writers_count == 0 || pipe.closed_write
+=======
+                pipe.available_to_read() > 0
+>>>>>>> 67740566240f8bc3cf3fa1dbde7456fa0a3e6ea6
             }
             _ => false,
         }

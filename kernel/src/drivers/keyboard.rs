@@ -162,6 +162,14 @@ fn execute_command(cmd: &str) -> ExecResult {
             lunix_println!("  acpi            - Display ACPI 2.0 tables and interrupt topology");
             lunix_println!("  spawn           - Spawn a preemptive background kernel worker thread");
             lunix_println!("  sysdemo         - Execute Ring 3 User Mode demo via fast SYSCALL ABI");
+<<<<<<< HEAD
+=======
+            lunix_println!("  tinycore        - Bootstrap Tiny Core Linux Userspace Init Sequence (/sbin/init)");
+            lunix_println!("  init            - Execute PID 1 init process in Ring 3 userspace");
+            lunix_println!("  startx          - Launch official Tiny Core Linux Graphical Desktop (FLWM + Wbar)");
+            lunix_println!("  desktop         - Start Tiny Core X11 GUI desktop session");
+            lunix_println!("  gui             - Launch LunixWM 32-bit Graphical Window Compositor");
+>>>>>>> 67740566240f8bc3cf3fa1dbde7456fa0a3e6ea6
             lunix_println!("  clear           - Clear console screen buffer");
             lunix_println!("  reboot          - Soft reboot machine via 8042 controller");
             lunix_println!("  panic           - Trigger a kernel panic diagnostic test");
@@ -568,6 +576,70 @@ fn execute_command(cmd: &str) -> ExecResult {
             run_user_mode_demo();
             return ExecResult::AsyncProcessSpawned;
         }
+<<<<<<< HEAD
+=======
+        "tinycore" | "init" => {
+            lunix_println!("=======================================================");
+            lunix_println!("  TINY CORE LINUX USERSPACE (PID 1 BOOT SEQUENCE)     ");
+            lunix_println!("=======================================================");
+            let init_path = if crate::fs::vfs::stat("/sbin/init").is_ok() {
+                "/sbin/init"
+            } else if crate::fs::vfs::stat("/bin/sh").is_ok() {
+                "/bin/sh"
+            } else {
+                "/bin/busybox"
+            };
+            match crate::task::elf::exec_elf_with_args(init_path, &["init"]) {
+                Ok(_) => {
+                    return ExecResult::AsyncProcessSpawned;
+                }
+                Err(e) => {
+                    lunix_println!("init: failed to launch '{}': {}", init_path, e);
+                }
+            }
+        }
+        "startx" | "desktop" | "tc-gui" => {
+            lunix_println!("=======================================================");
+            lunix_println!("  TINY CORE LINUX GRAPHICAL DESKTOP (FLWM + WBAR)      ");
+            lunix_println!("=======================================================");
+            lunix_println!("[*] Initializing X11 Framebuffer Server (Xfbdev on /dev/fb0)...");
+            lunix_println!("[*] Launching Fast Light Window Manager (flwm)...");
+            lunix_println!("[*] Launching Animated Application Dock (wbar)...");
+            lunix_println!("[*] Launching Graphical Terminal Emulator (aterm)...");
+
+            let script_path = if crate::fs::vfs::stat("/home/tc/.xsession").is_ok() {
+                "/home/tc/.xsession"
+            } else if crate::fs::vfs::stat("/usr/local/bin/startx").is_ok() {
+                "/usr/local/bin/startx"
+            } else if crate::fs::vfs::stat("/usr/local/bin/Xfbdev").is_ok() {
+                "/usr/local/bin/Xfbdev"
+            } else {
+                "/bin/sh"
+            };
+
+            match crate::task::elf::exec_elf_with_args(script_path, &["xsession"]) {
+                Ok(_) => {
+                    return ExecResult::AsyncProcessSpawned;
+                }
+                Err(e) => {
+                    lunix_println!("startx: failed to start desktop session '{}': {}", script_path, e);
+                }
+            }
+        }
+        "gui" => {
+            lunix_println!("Launching LunixWM 32-bit Graphical Window Compositor...");
+            if let Some(info) = crate::display::console::get_framebuffer_info() {
+                crate::display::desktop::init(info);
+                if let Some(ref mut comp) = *crate::display::compositor::COMPOSITOR.lock() {
+                    comp.is_gui_active = true;
+                }
+                crate::display::desktop::render_frame();
+                lunix_println!("[+] LunixWM desktop launched. Interactive multi-window GUI running at 60 FPS.");
+            } else {
+                lunix_println!("[-] Error: Framebuffer not initialized.");
+            }
+        }
+>>>>>>> 67740566240f8bc3cf3fa1dbde7456fa0a3e6ea6
         "clear" => {
             if let Some(ref mut console) = *crate::display::console::CONSOLE.lock() {
                 console.framebuffer.clear(console.bg_color);

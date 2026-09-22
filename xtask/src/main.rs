@@ -191,6 +191,523 @@ fn build_all(release: bool, convert: bool, force_rootfs: bool) -> Result<PathBuf
     Ok(img_path)
 }
 
+<<<<<<< HEAD
+=======
+struct CpioEntry {
+    name: String,
+    mode: u32,
+    data: Vec<u8>,
+}
+
+fn unpack_cpio_gz(gz_bytes: &[u8]) -> Result<Vec<CpioEntry>> {
+    use flate2::read::GzDecoder;
+    let mut decoder = GzDecoder::new(gz_bytes);
+    let mut cpio_data = Vec::new();
+    decoder.read_to_end(&mut cpio_data)?;
+
+    let mut entries = Vec::new();
+    let mut pos = 0;
+    while pos + 110 <= cpio_data.len() {
+        let magic = &cpio_data[pos..pos + 6];
+        if magic != b"070701" && magic != b"070702" {
+            break;
+        }
+        let mode_str = std::str::from_utf8(&cpio_data[pos + 14..pos + 22])
+            .unwrap_or("0");
+        let size_str = std::str::from_utf8(&cpio_data[pos + 54..pos + 62])
+            .unwrap_or("0");
+        let name_str = std::str::from_utf8(&cpio_data[pos + 94..pos + 102])
+            .unwrap_or("0");
+
+        let mode = u32::from_str_radix(mode_str, 16).unwrap_or(0);
+        let filesize = usize::from_str_radix(size_str, 16).unwrap_or(0);
+        let namesize = usize::from_str_radix(name_str, 16).unwrap_or(0);
+
+        pos += 110;
+        if pos + namesize > cpio_data.len() {
+            break;
+        }
+        let name_bytes = &cpio_data[pos..pos + namesize.saturating_sub(1)];
+        let name = String::from_utf8_lossy(name_bytes).to_string();
+        pos = (pos + namesize + 3) & !3;
+
+        if name == "TRAILER!!!" {
+            break;
+        }
+
+        if pos + filesize > cpio_data.len() {
+            break;
+        }
+        let data = cpio_data[pos..pos + filesize].to_vec();
+        pos = (pos + filesize + 3) & !3;
+
+        entries.push(CpioEntry { name, mode, data });
+    }
+
+    Ok(entries)
+}
+
+fn resolve_relative_path(base_file: &str, target: &str) -> String {
+    if target.starts_with('/') {
+        return target.trim_start_matches('/').to_string();
+    }
+    let mut parts: Vec<&str> = base_file.split('/').filter(|s| !s.is_empty()).collect();
+    if !parts.is_empty() {
+        parts.pop(); // remove filename, keep directory
+    }
+    for seg in target.split('/') {
+        if seg.is_empty() || seg == "." {
+            continue;
+        } else if seg == ".." {
+            parts.pop();
+        } else {
+            parts.push(seg);
+        }
+    }
+    parts.join("/")
+}
+
+fn create_dir_all_fs<T: Read + Write + std::io::Seek>(
+    fs: &fatfs::FileSystem<T>,
+    path: &str,
+) -> Result<()> {
+    let clean = path.trim_start_matches('/').trim_end_matches('/');
+    if clean.is_empty() || clean == "." {
+        return Ok(());
+    }
+    let parts: Vec<&str> = clean.split('/').filter(|s| !s.is_empty() && *s != ".").collect();
+    let mut cur = fs.root_dir();
+    for seg in parts {
+        let next = match cur.open_dir(seg) {
+            Ok(d) => d,
+            Err(_) => {
+                if let Err(e) = cur.create_dir(seg) {
+                    eprintln!("[WARN] create_dir_all_fs create_dir '{}' in '{}' failed: {:?}", seg, path, e);
+                }
+                cur.open_dir(seg)
+                    .with_context(|| format!("create_dir_all_fs failed to open directory '{}' in path '{}'", seg, path))?
+            }
+        };
+        cur = next;
+    }
+    Ok(())
+}
+
+fn write_file_to_fs<T: Read + Write + std::io::Seek>(
+    fs: &fatfs::FileSystem<T>,
+    path: &str,
+    data: &[u8],
+) -> Result<()> {
+    let clean = path.trim_start_matches('/');
+    let parts: Vec<&str> = clean.split('/').filter(|s| !s.is_empty() && *s != ".").collect();
+    if parts.is_empty() {
+        return Ok(());
+    }
+
+    let file_name = parts[parts.len() - 1];
+    let dir_parts = &parts[..parts.len() - 1];
+
+    let mut cur = fs.root_dir();
+    for seg in dir_parts {
+        let next = match cur.open_dir(seg) {
+            Ok(d) => d,
+            Err(_) => {
+                if let Err(e) = cur.create_dir(seg) {
+                    eprintln!("[WARN] write_file_to_fs create_dir '{}' for '{}' failed: {:?}", seg, path, e);
+                }
+                cur.open_dir(seg)
+                    .with_context(|| format!("write_file_to_fs failed to open directory '{}' for file '{}'", seg, path))?
+            }
+        };
+        cur = next;
+    }
+
+    let mut file = cur.create_file(file_name)
+        .with_context(|| format!("write_file_to_fs failed to create file '{}'", path))?;
+    file.write_all(data)
+        .with_context(|| format!("write_file_to_fs failed to write data to '{}'", path))?;
+    Ok(())
+}
+
+fn create_fat32_image(img_path: &Path, bootloader_bin: &Path, kernel_bin: &Path) -> Result<()> {
+    let mut bootloader_bytes = Vec::new();
+    File::open(bootloader_bin)
+        .with_context(|| format!("Failed to open {}", bootloader_bin.display()))?
+        .read_to_end(&mut bootloader_bytes)?;
+
+    let mut kernel_bytes = Vec::new();
+    File::open(kernel_bin)
+        .with_context(|| format!("Failed to open {}", kernel_bin.display()))?
+        .read_to_end(&mut kernel_bytes)?;
+
+    let total_disk_size: usize = 512 * 1024 * 1024; // 512 MiB total disk
+    let total_sectors = (total_disk_size / 512) as u64;
+    let partition_start_lba: u64 = 2048; // 1 MiB alignment
+    let partition_end_lba: u64 = total_sectors - 34; // Leaves 33 sectors for Backup GPT table & header
+    let partition_sectors = (partition_end_lba - partition_start_lba + 1) as usize;
+    let partition_size_bytes = partition_sectors * 512;
+    let partition_start_bytes = (partition_start_lba * 512) as usize;
+
+    let mut part_buf = std::io::Cursor::new(vec![0u8; partition_size_bytes]);
+
+    fatfs::format_volume(
+        &mut part_buf,
+        fatfs::FormatVolumeOptions::new()
+            .fat_type(fatfs::FatType::Fat32)
+            .bytes_per_cluster(4096),
+    )?;
+
+    {
+        let fs = fatfs::FileSystem::new(&mut part_buf, fatfs::FsOptions::new())?;
+
+        // 1. Install Lunix Bootloader and Core Kernel FIRST
+        write_file_to_fs(&fs, "EFI/BOOT/BOOTX64.EFI", &bootloader_bytes)?;
+        write_file_to_fs(&fs, "LUNIX/KERNEL.BIN", &kernel_bytes)?;
+
+        // 2. Unpack upstream official Tiny Core Linux rootfs (corepure64.gz) if available
+        let root = get_workspace_root();
+        let core_gz_path = root.join("target").join("corepure64.gz");
+        let mut file_map: HashMap<String, Vec<u8>> = HashMap::new();
+
+        if core_gz_path.is_file() {
+            println!("[+] Extracting official upstream Tiny Core Linux x86_64 rootfs (corepure64.gz)...");
+            let mut gz_bytes = Vec::new();
+            File::open(&core_gz_path)?.read_to_end(&mut gz_bytes)?;
+            let entries = unpack_cpio_gz(&gz_bytes)?;
+            println!("    -> Unpacked {} entries from Tiny Core CPIO archive", entries.len());
+
+            // A. Index all regular files
+            for entry in &entries {
+                if (entry.mode & 0o170000) == 0o100000 {
+                    file_map.insert(entry.name.trim_start_matches('/').to_string(), entry.data.clone());
+                }
+            }
+
+            // B. Create directory structure
+            for entry in &entries {
+                if (entry.mode & 0o170000) == 0o040000 {
+                    let _ = create_dir_all_fs(&fs, &entry.name);
+                }
+            }
+
+            // C. Write regular files
+            for entry in &entries {
+                if (entry.mode & 0o170000) == 0o100000 {
+                    let _ = write_file_to_fs(&fs, &entry.name, &entry.data);
+                }
+            }
+
+            // D. Materialize symlinks
+            for entry in &entries {
+                if (entry.mode & 0o170000) == 0o120000 {
+                    let target_str = String::from_utf8_lossy(&entry.data);
+                    let resolved = resolve_relative_path(&entry.name, &target_str);
+                    let clean_tgt = resolved.trim_start_matches('/');
+
+                    if let Some(target_data) = file_map.get(clean_tgt) {
+                        let _ = write_file_to_fs(&fs, &entry.name, target_data);
+                    } else if clean_tgt.ends_with("busybox") || target_str.contains("busybox") {
+                        if let Some(bb_data) = file_map.get("bin/busybox") {
+                            let _ = write_file_to_fs(&fs, &entry.name, bb_data);
+                        }
+                    } else {
+                        let sym_text = format!("symlink:{}\n", target_str);
+                        let _ = write_file_to_fs(&fs, &entry.name, sym_text.as_bytes());
+                    }
+                }
+            }
+
+            // Ensure /lib64/ld-linux-x86-64.so.2 exists
+            if let Some(ld_data) = file_map.get("lib/ld-linux-x86-64.so.2") {
+                let _ = write_file_to_fs(&fs, "lib64/ld-linux-x86-64.so.2", ld_data);
+            }
+        }
+
+        // 3. Extract and integrate official Tiny Core GUI TCZ extensions
+        let iso_path = root.join("target").join("TinyCorePure64.iso");
+        let tcz_all_dir = root.join("target").join("scratch").join("tcz_all");
+
+        if !tcz_all_dir.is_dir() && iso_path.is_file() {
+            println!("[+] Extracting 33 official Tiny Core Linux GUI packages (.tcz) from ISO...");
+            let cde_raw = root.join("target").join("scratch").join("tcz_raw");
+            let _ = std::fs::create_dir_all(&cde_raw);
+            let _ = std::fs::create_dir_all(&tcz_all_dir);
+            let _ = Command::new("7z")
+                .args(["x", "-y", &format!("-o{}", cde_raw.display()), &iso_path.to_string_lossy(), "cde/optional/*.tcz"])
+                .output();
+
+            let opt_dir = cde_raw.join("cde").join("optional");
+            if opt_dir.is_dir() {
+                if let Ok(entries) = std::fs::read_dir(opt_dir) {
+                    for entry in entries.flatten() {
+                        let path = entry.path();
+                        if path.extension().and_then(|s| s.to_str()) == Some("tcz") {
+                            let _ = Command::new("7z")
+                                .args(["x", "-y", &format!("-o{}", tcz_all_dir.display()), &path.to_string_lossy()])
+                                .output();
+                        }
+                    }
+                }
+            }
+        }
+
+        if tcz_all_dir.is_dir() {
+            println!("[+] Ingesting official Tiny Core Desktop packages (Xfbdev, flwm, wbar, aterm, cpanel, editor)...");
+            let mut tcz_count = 0;
+            fn walk_and_write(fs: &fatfs::FileSystem<&mut std::io::Cursor<Vec<u8>>>, dir: &Path, base: &Path, count: &mut usize) -> Result<()> {
+                if let Ok(entries) = std::fs::read_dir(dir) {
+                    for entry in entries.flatten() {
+                        let p = entry.path();
+                        let rel = p.strip_prefix(base).unwrap().to_string_lossy().replace('\\', "/");
+                        if p.is_dir() {
+                            let _ = create_dir_all_fs(fs, &rel);
+                            walk_and_write(fs, &p, base, count)?;
+                        } else if p.is_file() {
+                            if let Ok(data) = std::fs::read(&p) {
+                                let _ = write_file_to_fs(fs, &rel, &data);
+                                *count += 1;
+
+                                // Mirror shared libraries (.so) to /lib and /usr/lib for universal dynamic linking
+                                if rel.starts_with("usr/local/lib/") && (rel.ends_with(".so") || rel.contains(".so.")) {
+                                    let lib_rel = rel.trim_start_matches("usr/local/lib/");
+                                    if !lib_rel.contains('/') {
+                                        let _ = write_file_to_fs(fs, &format!("lib/{}", lib_rel), &data);
+                                        let _ = write_file_to_fs(fs, &format!("usr/lib/{}", lib_rel), &data);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                Ok(())
+            }
+            let _ = walk_and_write(&fs, &tcz_all_dir, &tcz_all_dir, &mut tcz_count);
+            println!("    -> Successfully ingested {} official Tiny Core GUI files into FAT32 rootfs", tcz_count);
+        }
+
+        // 4. Install Standalone User ELF & Win32 PE Test Suite
+        write_file_to_fs(&fs, "bin/hello.elf", &create_hello_elf())?;
+        write_file_to_fs(&fs, "bin/sysinfo.elf", &create_sysinfo_elf())?;
+        write_file_to_fs(&fs, "bin/test_fork.elf", &create_test_fork_elf())?;
+        write_file_to_fs(&fs, "bin/test_exec.elf", &create_test_exec_elf())?;
+        write_file_to_fs(&fs, "bin/win_hello.exe", &create_win32_hello_exe())?;
+        write_file_to_fs(&fs, "bin/test_pipe.elf", &create_test_pipe_elf())?;
+        write_file_to_fs(&fs, "bin/test_dir.elf", &create_test_dir_elf())?;
+        write_file_to_fs(&fs, "bin/win_stream.exe", &create_win32_stream_exe())?;
+        write_file_to_fs(&fs, "bin/test_devproc.elf", &create_test_devproc_elf())?;
+        write_file_to_fs(&fs, "bin/win_envreg.exe", &create_win32_envreg_exe())?;
+        write_file_to_fs(&fs, "bin/test_busybox.elf", &create_test_busybox_elf())?;
+        write_file_to_fs(&fs, "bin/test_tinycore.elf", &create_test_tinycore_elf())?;
+        write_file_to_fs(&fs, "bin/test_dynamic.elf", &create_dynamic_test_elf())?;
+        write_file_to_fs(&fs, "lib/ld-linux-test.so.2", &create_ld_linux_so())?;
+
+        // 5. If upstream BusyBox was not in archive, provide fallback BusyBox & Glibc
+        let busybox_elf = create_busybox_elf();
+        if !file_map.contains_key("bin/busybox") {
+            write_file_to_fs(&fs, "bin/busybox", &busybox_elf)?;
+            write_file_to_fs(&fs, "bin/sh", &busybox_elf)?;
+            write_file_to_fs(&fs, "sbin/init", &create_sbin_init_elf())?;
+            write_file_to_fs(&fs, "sbin/reboot", &busybox_elf)?;
+            write_file_to_fs(&fs, "sbin/halt", &busybox_elf)?;
+        }
+
+        if !file_map.contains_key("lib/ld-linux-x86-64.so.2") {
+            let ld_so_bytes = create_ld_linux_so();
+            write_file_to_fs(&fs, "lib/ld-linux-x86-64.so.2", &ld_so_bytes)?;
+            write_file_to_fs(&fs, "lib/libc.so.6", &ld_so_bytes)?;
+            write_file_to_fs(&fs, "lib64/ld-linux-x86-64.so.2", &ld_so_bytes)?;
+        }
+
+        // 6. Install Windows NT Sample Driver
+        let sample_wdm = create_sample_wdm_sys();
+        write_file_to_fs(&fs, "sys/drivers/sample_wdm.sys", &sample_wdm)?;
+        write_file_to_fs(&fs, "bin/sample_wdm.sys", &sample_wdm)?;
+
+        // 7. Setup /etc configuration files
+        let inittab_data = b"::sysinit:/etc/init.d/rcS\ntty1::respawn:/bin/sh\n::ctrlaltdel:/sbin/reboot\n::shutdown:/sbin/halt\n";
+        write_file_to_fs(&fs, "etc/inittab", inittab_data)?;
+
+        let rcs_data = b"#!/bin/sh\necho '[BOOT] Running /etc/init.d/rcS system startup scripts...'\n[ -f /proc/cmdline ] || /bin/mount /proc\n/bin/mount -o remount,rw /\n/bin/hostname box\nexport PATH=/bin:/usr/bin:/sbin:/usr/sbin:/usr/local/bin\nexport LD_LIBRARY_PATH=/usr/local/lib:/usr/lib:/lib:/lib64:/usr/lib64\nexport USER=tc\nexport HOME=/home/tc\nexport SHELL=/bin/sh\n";
+        write_file_to_fs(&fs, "etc/init.d/rcS", rcs_data)?;
+
+        let passwd_data = b"root:x:0:0:root:/root:/bin/sh\ntc:x:1001:1001:tc:/home/tc:/bin/sh\n";
+        write_file_to_fs(&fs, "etc/passwd", passwd_data)?;
+
+        let group_data = b"root:x:0:\nstaff:x:50:tc\ntc:x:1001:\n";
+        write_file_to_fs(&fs, "etc/group", group_data)?;
+
+        let fstab_data = b"/dev/sda / fat32 defaults 0 0\nproc /proc proc defaults 0 0\ndev /dev devtmpfs defaults 0 0\n";
+        write_file_to_fs(&fs, "etc/fstab", fstab_data)?;
+
+        let issue_data = b"\nTiny Core Linux v15.0 on Lunix Hybrid Kernel (x86_64)\n\n";
+        write_file_to_fs(&fs, "etc/issue", issue_data)?;
+
+        let os_rel_data = b"NAME=\"TinyCore Linux on Lunix\"\nPRETTY_NAME=\"Tiny Core Linux v15.0 (Lunix Hybrid Kernel)\"\nID=tinycore\nVERSION=\"15.0\"\nVERSION_ID=15.0\nBUILD_ID=\"2026-09-14\"\nANSI_COLOR=\"0;36\"\nHOME_URL=\"http://tinycorelinux.net\"\n";
+        write_file_to_fs(&fs, "etc/os-release", os_rel_data)?;
+
+        write_file_to_fs(&fs, "etc/hostname", b"box\n")?;
+        write_file_to_fs(&fs, "etc/ld.so.conf", b"/lib\n/usr/lib\n/usr/local/lib\n/lib64\n/usr/lib64\n")?;
+
+        // 8. Setup Tiny Core Desktop Configuration
+        let _ = create_dir_all_fs(&fs, "etc/sysconfig");
+        write_file_to_fs(&fs, "etc/sysconfig/Xserver", b"Xfbdev\n")?;
+        write_file_to_fs(&fs, "etc/sysconfig/desktop", b"flwm\n")?;
+        write_file_to_fs(&fs, "etc/sysconfig/icons", b"wbar\n")?;
+        write_file_to_fs(&fs, "etc/sysconfig/tcuser", b"tc\n")?;
+        write_file_to_fs(&fs, "etc/sysconfig/tcedir", b"/tce\n")?;
+
+        // 9. Setup user profiles & desktop sessions
+        let _ = create_dir_all_fs(&fs, "home/tc");
+        let tc_profile = b"export USER=\"tc\"\nexport HOME=\"/home/tc\"\nexport SHELL=\"/bin/sh\"\nexport PATH=\"/bin:/usr/bin:/sbin:/usr/sbin:/usr/local/bin\"\nexport LD_LIBRARY_PATH=\"/usr/local/lib:/usr/lib:/lib:/lib64:/usr/lib64\"\nexport DISPLAY=\":0.0\"\necho 'Welcome to Tiny Core Linux on Lunix!'\n";
+        write_file_to_fs(&fs, "home/tc/.profile", tc_profile)?;
+        write_file_to_fs(&fs, "home/tc/readme.txt", b"Tiny Core Linux v15.0 FLWM + Wbar Graphical Desktop running on 100% pure Rust Lunix Kernel.\n")?;
+
+        let xsession_data = b"#!/bin/sh\n# Tiny Core Linux Official Desktop Session\nexport DISPLAY=:0.0\nexport HOME=/home/tc\nexport USER=tc\nexport DESKTOP=flwm\nexport ICONS=wbar\nexport LD_LIBRARY_PATH=/usr/local/lib:/usr/lib:/lib:/lib64:/usr/lib64\nexport PATH=/bin:/usr/bin:/sbin:/usr/sbin:/usr/local/bin\n\n/usr/local/bin/Xfbdev -br -screen 1024x768x32 -mouse /dev/input/mice,3 &\nexport XPID=$!\n/bin/sleep 1\n/usr/local/bin/flwm &\n/usr/local/bin/wbar -bpress -pos bottom -zoomf 2 -isize 32 &\n/usr/local/bin/aterm -geometry 80x24+50+50 &\n";
+        write_file_to_fs(&fs, "home/tc/.xsession", xsession_data)?;
+
+        let wbar_data = b"i: /usr/local/share/wbar/osxbarback.png\nt: /usr/local/lib/X11/fonts/TTF/luxisr/11\nc: wbar -bpress -pos bottom -zoomf 2 -isize 32\n\ni: /usr/local/share/pixmaps/terminal.png\nt: Terminal\nc: aterm\n\ni: /usr/local/share/pixmaps/editor.png\nt: Editor\nc: editor\n\ni: /usr/local/share/pixmaps/cpanel.png\nt: ControlPanel\nc: cpanel\n\ni: /usr/local/share/pixmaps/exit.png\nt: Exit\nc: exittc\n";
+        write_file_to_fs(&fs, "home/tc/.wbar", wbar_data)?;
+        write_file_to_fs(&fs, "home/tc/.setbackground", b"#!/bin/sh\n/usr/local/bin/hsetroot -solid '#2d415f'\n")?;
+
+        let lunix_readme = b"Welcome to Lunix OS!\n\nA from-scratch hybrid operating system kernel written in 100% pure Rust.\nCombines Windows NT Driver Model (WDM) with Linux POSIX ABI & ELF64 execution.\n\nType 'startx' to launch the official Tiny Core FLWM + Wbar Graphical Desktop.\n";
+        write_file_to_fs(&fs, "home/lunix/readme.txt", lunix_readme)?;
+
+        // 10. Ensure directories exist
+        let _ = create_dir_all_fs(&fs, "tmp/.X11-unix");
+        let _ = create_dir_all_fs(&fs, "var/run");
+        let _ = create_dir_all_fs(&fs, "var/log");
+        let _ = create_dir_all_fs(&fs, "usr/bin");
+        let _ = create_dir_all_fs(&fs, "usr/sbin");
+        let _ = create_dir_all_fs(&fs, "usr/lib");
+        let _ = create_dir_all_fs(&fs, "usr/local/bin");
+        let _ = create_dir_all_fs(&fs, "usr/local/lib");
+        let _ = create_dir_all_fs(&fs, "tce/optional");
+    }
+
+    // Construct the complete GPT + Protective MBR disk image
+    let mut disk_data = vec![0u8; total_disk_size];
+    let total_sectors = (total_disk_size / 512) as u64;
+
+    // 1. Protective MBR at Sector 0
+    let entry_offset = 446;
+    disk_data[entry_offset] = 0x00; // Boot Indicator
+    disk_data[entry_offset + 1] = 0x00; // Starting Head
+    disk_data[entry_offset + 2] = 0x02; // Starting Sector
+    disk_data[entry_offset + 3] = 0x00; // Starting Cylinder
+    disk_data[entry_offset + 4] = 0xEE; // Partition Type: GPT Protective
+    disk_data[entry_offset + 5] = 0xFF; // Ending Head
+    disk_data[entry_offset + 6] = 0xFF; // Ending Sector
+    disk_data[entry_offset + 7] = 0xFF; // Ending Cylinder
+    disk_data[entry_offset + 8..entry_offset + 12].copy_from_slice(&1u32.to_le_bytes()); // Starting LBA = 1
+    disk_data[entry_offset + 12..entry_offset + 16].copy_from_slice(&((total_sectors - 1) as u32).to_le_bytes()); // Total Sectors
+
+    // MBR Boot Signature at offset 510
+    disk_data[510] = 0x55;
+    disk_data[511] = 0xAA;
+
+    // 2. GPT Partition Entries Array (128 entries * 128 bytes = 16384 bytes = 32 sectors)
+    let mut part_entries = vec![0u8; 128 * 128];
+    // Entry 0: EFI System Partition (ESP)
+    // Partition Type GUID: C12A7328-F81F-11D2-BA4B-00A0C93EC93B (mixed-endian format)
+    let esp_type_guid: [u8; 16] = [
+        0x28, 0x73, 0x2A, 0xC1, 0x1F, 0xF8, 0xD2, 0x11, 0xBA, 0x4B, 0x00, 0xA0, 0xC9, 0x3E, 0xC9, 0x3B,
+    ];
+    let unique_part_guid: [u8; 16] = [
+        0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x00,
+    ];
+    part_entries[0..16].copy_from_slice(&esp_type_guid);
+    part_entries[16..32].copy_from_slice(&unique_part_guid);
+    part_entries[32..40].copy_from_slice(&2048u64.to_le_bytes()); // Starting LBA = 2048
+    part_entries[40..48].copy_from_slice(&(total_sectors - 34).to_le_bytes()); // Ending LBA
+    part_entries[48..56].copy_from_slice(&0u64.to_le_bytes()); // Attributes = 0
+    // Partition Name: UTF-16LE "EFI System Partition"
+    let name_utf16: Vec<u16> = "EFI System Partition".encode_utf16().collect();
+    for (idx, &ch) in name_utf16.iter().enumerate() {
+        if idx < 36 {
+            part_entries[56 + idx * 2..56 + idx * 2 + 2].copy_from_slice(&ch.to_le_bytes());
+        }
+    }
+
+    let part_crc = calc_crc32(&part_entries);
+    let disk_guid: [u8; 16] = [
+        0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10,
+    ];
+
+    // 3. Primary GPT Header at Sector 1 (offset 512..512+92)
+    let mut primary_hdr = vec![0u8; 92];
+    primary_hdr[0..8].copy_from_slice(b"EFI PART");
+    primary_hdr[8..12].copy_from_slice(&0x00010000u32.to_le_bytes()); // Revision 1.0
+    primary_hdr[12..16].copy_from_slice(&92u32.to_le_bytes()); // Header size
+    primary_hdr[16..20].copy_from_slice(&0u32.to_le_bytes()); // CRC32 (zero during computation)
+    primary_hdr[20..24].copy_from_slice(&0u32.to_le_bytes()); // Reserved
+    primary_hdr[24..32].copy_from_slice(&1u64.to_le_bytes()); // My LBA = 1
+    primary_hdr[32..40].copy_from_slice(&(total_sectors - 1).to_le_bytes()); // Alternate LBA
+    primary_hdr[40..48].copy_from_slice(&2048u64.to_le_bytes()); // First Usable LBA
+    primary_hdr[48..56].copy_from_slice(&(total_sectors - 34).to_le_bytes()); // Last Usable LBA
+    primary_hdr[56..72].copy_from_slice(&disk_guid);
+    primary_hdr[72..80].copy_from_slice(&2u64.to_le_bytes()); // Partition entries starting LBA = 2
+    primary_hdr[80..84].copy_from_slice(&128u32.to_le_bytes()); // Number of partition entries = 128
+    primary_hdr[84..88].copy_from_slice(&128u32.to_le_bytes()); // Size of each partition entry = 128
+    primary_hdr[88..92].copy_from_slice(&part_crc.to_le_bytes());
+
+    let primary_hdr_crc = calc_crc32(&primary_hdr);
+    primary_hdr[16..20].copy_from_slice(&primary_hdr_crc.to_le_bytes());
+
+    disk_data[512..512 + 92].copy_from_slice(&primary_hdr);
+    disk_data[1024..1024 + 16384].copy_from_slice(&part_entries);
+
+    // 4. Backup GPT Header & Partition Array at end of disk
+    let backup_part_lba = total_sectors - 33;
+    let backup_hdr_lba = total_sectors - 1;
+    let backup_part_start = (backup_part_lba * 512) as usize;
+    disk_data[backup_part_start..backup_part_start + 16384].copy_from_slice(&part_entries);
+
+    let mut backup_hdr = vec![0u8; 92];
+    backup_hdr[0..8].copy_from_slice(b"EFI PART");
+    backup_hdr[8..12].copy_from_slice(&0x00010000u32.to_le_bytes());
+    backup_hdr[12..16].copy_from_slice(&92u32.to_le_bytes());
+    backup_hdr[16..20].copy_from_slice(&0u32.to_le_bytes());
+    backup_hdr[20..24].copy_from_slice(&0u32.to_le_bytes());
+    backup_hdr[24..32].copy_from_slice(&backup_hdr_lba.to_le_bytes()); // My LBA = backup_hdr_lba
+    backup_hdr[32..40].copy_from_slice(&1u64.to_le_bytes()); // Alternate LBA = 1
+    backup_hdr[40..48].copy_from_slice(&2048u64.to_le_bytes());
+    backup_hdr[48..56].copy_from_slice(&(total_sectors - 34).to_le_bytes());
+    backup_hdr[56..72].copy_from_slice(&disk_guid);
+    backup_hdr[72..80].copy_from_slice(&backup_part_lba.to_le_bytes());
+    backup_hdr[80..84].copy_from_slice(&128u32.to_le_bytes());
+    backup_hdr[84..88].copy_from_slice(&128u32.to_le_bytes());
+    backup_hdr[88..92].copy_from_slice(&part_crc.to_le_bytes());
+
+    let backup_hdr_crc = calc_crc32(&backup_hdr);
+    backup_hdr[16..20].copy_from_slice(&backup_hdr_crc.to_le_bytes());
+
+    let backup_hdr_start = (backup_hdr_lba * 512) as usize;
+    disk_data[backup_hdr_start..backup_hdr_start + 92].copy_from_slice(&backup_hdr);
+
+    // 5. Patch FAT32 BPB_HiddSec to 2048 (offset 28..32) on Primary Boot Sector and Backup Boot Sector (Sector 6)
+    let mut part_bytes = part_buf.into_inner();
+    let hidden_sectors = 2048u32.to_le_bytes();
+    part_bytes[28..32].copy_from_slice(&hidden_sectors);
+    if part_bytes.len() >= (6 * 512 + 32) {
+        part_bytes[6 * 512 + 28..6 * 512 + 32].copy_from_slice(&hidden_sectors);
+    }
+
+    // Copy FAT32 partition data at offset 1 MiB (2048 * 512)
+    disk_data[partition_start_bytes..partition_start_bytes + partition_size_bytes].copy_from_slice(&part_bytes);
+
+    // Write RAM buffer to file in a single fast write
+    let mut img_file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(img_path)?;
+
+    img_file.write_all(&disk_data)?;
+    Ok(())
+}
+
+>>>>>>> 67740566240f8bc3cf3fa1dbde7456fa0a3e6ea6
 fn calc_crc32(data: &[u8]) -> u32 {
     let mut crc: u32 = 0xFFFF_FFFF;
     for &byte in data {

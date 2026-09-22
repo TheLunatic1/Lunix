@@ -65,7 +65,11 @@ def test_tinycore_gui():
             time.sleep(0.008)
 
     print("[*] Waiting for Lunix OS to boot...")
+<<<<<<< HEAD
     time.sleep(6.5)
+=======
+    time.sleep(4.5)
+>>>>>>> 67740566240f8bc3cf3fa1dbde7456fa0a3e6ea6
 
     test_commands = [
         ("ls /etc/sysconfig\n", 1.0),

@@ -369,11 +369,20 @@ impl FileSystem for DevFs {
                 }
             }
             "fb0" | "fb/0" | "graphics/fb0" => Ok(Box::new(FbHandle::new())),
+<<<<<<< HEAD
             "input/event0" => Ok(Box::new(crate::drivers::evdev::EventDev::new(crate::drivers::evdev::KEYBOARD))),
             "input/event1" => Ok(Box::new(crate::drivers::evdev::EventDev::new(crate::drivers::evdev::MOUSE))),
             "mice" | "mouse" | "input/mice" | "input/mouse" => Ok(Box::new(MiceHandle)),
             "input/mice0" | "input/mice1" => Ok(Box::new(MiceHandle)),
             "sda" | "vda" => Ok(Box::new(BlockDevHandle::new(clean))),
+=======
+            "mice" | "mouse" | "input/mice" | "input/mouse" | "input/event0" => Ok(Box::new(MiceHandle)),
+            "input/mice0" | "input/mice1" => Ok(Box::new(MiceHandle)),
+            "sda" => Ok(Box::new(BlockDevHandle {
+                position: 0,
+                size: 64 * 1024 * 1024,
+            })),
+>>>>>>> 67740566240f8bc3cf3fa1dbde7456fa0a3e6ea6
             _ => Err(VfsError::NotFound),
         }
     }
@@ -524,6 +533,7 @@ impl FileSystem for DevFs {
                 permissions: 0o666,
                 name: String::from("fb0"),
             }),
+<<<<<<< HEAD
             "input/event0" | "input/event1" => Ok(INode {
                 id: 11,
                 size: 0,
@@ -532,12 +542,16 @@ impl FileSystem for DevFs {
                 name: String::from("event"),
             }),
             "mice" | "mouse" | "input/mice" | "input/mouse" | "input/mice0" | "input/mice1" => Ok(INode {
+=======
+            "mice" | "mouse" | "input/mice" | "input/mouse" | "input/event0" | "input/mice0" | "input/mice1" => Ok(INode {
+>>>>>>> 67740566240f8bc3cf3fa1dbde7456fa0a3e6ea6
                 id: 10,
                 size: 0,
                 node_type: INodeType::CharDevice,
                 permissions: 0o666,
                 name: String::from("mice"),
             }),
+<<<<<<< HEAD
             "sda" | "vda" => {
                 let size = crate::fs::block::get_block_device(clean)
                     .map(|d| d.total_blocks() * d.block_size() as u64)
@@ -550,6 +564,15 @@ impl FileSystem for DevFs {
                     name: String::from(clean),
                 })
             }
+=======
+            "sda" => Ok(INode {
+                id: 8,
+                size: 64 * 1024 * 1024,
+                node_type: INodeType::BlockDevice,
+                permissions: 0o660,
+                name: String::from("sda"),
+            }),
+>>>>>>> 67740566240f8bc3cf3fa1dbde7456fa0a3e6ea6
             _ => Err(VfsError::NotFound),
         }
     }

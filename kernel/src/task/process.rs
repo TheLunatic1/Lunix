@@ -24,8 +24,11 @@ pub enum FdTarget {
     PipeRead(Arc<Mutex<crate::task::pipe::PipeBuffer>>),
     PipeWrite(Arc<Mutex<crate::task::pipe::PipeBuffer>>),
     Socket(usize),
+<<<<<<< HEAD
     Epoll(crate::syscall::epoll::EpollSet),
     EventFd(Arc<Mutex<u64>>),
+=======
+>>>>>>> 67740566240f8bc3cf3fa1dbde7456fa0a3e6ea6
     UnixSocket(Arc<Mutex<crate::syscall::unix_socket::UnixSocket>>),
     VfsHandle {
         handle: Arc<Mutex<Box<dyn crate::fs::file::FileHandle>>>,

@@ -3,16 +3,22 @@ use crate::{lunix_print, lunix_println};
 use core::slice;
 use spin::Mutex;
 
+<<<<<<< HEAD
 pub mod epoll;
 pub mod futex;
+=======
+>>>>>>> 67740566240f8bc3cf3fa1dbde7456fa0a3e6ea6
 pub mod unix_socket;
 
 pub static IN_MEMORY_FILES: spin::Mutex<alloc::collections::BTreeMap<alloc::string::String, alloc::sync::Arc<spin::Mutex<alloc::vec::Vec<u8>>>>> =
     spin::Mutex::new(alloc::collections::BTreeMap::new());
 
+<<<<<<< HEAD
 pub static SYMLINKS: spin::Mutex<alloc::collections::BTreeMap<alloc::string::String, alloc::string::String>> =
     spin::Mutex::new(alloc::collections::BTreeMap::new());
 
+=======
+>>>>>>> 67740566240f8bc3cf3fa1dbde7456fa0a3e6ea6
 // Linux x86_64 standard syscall numbers
 pub const LINUX_SYS_READ: usize = 0;
 pub const LINUX_SYS_WRITE: usize = 1;
@@ -136,6 +142,7 @@ pub const LINUX_SYS_READLINKAT: usize = 267;
 pub const LINUX_SYS_FACCESSAT: usize = 269;
 pub const LINUX_SYS_SET_ROBUST_LIST: usize = 273;
 pub const LINUX_SYS_GET_ROBUST_LIST: usize = 274;
+<<<<<<< HEAD
 pub const LINUX_SYS_TIMERFD_CREATE: usize = 283;
 pub const LINUX_SYS_FALLOCATE: usize = 285;
 pub const LINUX_SYS_TIMERFD_SETTIME: usize = 286;
@@ -144,6 +151,9 @@ pub const LINUX_SYS_ACCEPT4: usize = 288;
 pub const LINUX_SYS_SIGNALFD4: usize = 289;
 pub const LINUX_SYS_EVENTFD2: usize = 290;
 pub const LINUX_SYS_EPOLL_CREATE1: usize = 291;
+=======
+pub const LINUX_SYS_ACCEPT4: usize = 288;
+>>>>>>> 67740566240f8bc3cf3fa1dbde7456fa0a3e6ea6
 pub const LINUX_SYS_DUP3: usize = 292;
 pub const LINUX_SYS_PIPE2: usize = 293;
 pub const LINUX_SYS_PRLIMIT64: usize = 302;
@@ -323,8 +333,13 @@ pub extern "C" fn syscall_dispatcher(
         LINUX_SYS_SOCKETPAIR => sys_socketpair(arg1 as i32, arg2 as i32, arg3 as i32, arg4 as *mut [i32; 2]) as u64,
         LINUX_SYS_SETSOCKOPT => sys_setsockopt(arg1 as usize, arg2 as i32, arg3 as i32, arg4 as *const u8, arg5 as u32) as u64,
         LINUX_SYS_GETSOCKOPT => sys_getsockopt(arg1 as usize, arg2 as i32, arg3 as i32, arg4 as *mut u8, arg5 as *mut u32) as u64,
+<<<<<<< HEAD
         LINUX_SYS_CLONE => sys_clone(arg1, arg2, arg3, arg4, arg5) as u64,
         LINUX_SYS_FORK => sys_clone(0, 0, 0, 0, 0) as u64,
+=======
+        LINUX_SYS_CLONE => sys_clone(arg1, arg2) as u64,
+        LINUX_SYS_FORK => sys_clone(0, 0) as u64,
+>>>>>>> 67740566240f8bc3cf3fa1dbde7456fa0a3e6ea6
         LINUX_SYS_VFORK => sys_vfork() as u64,
         LINUX_SYS_EXECVE => sys_execve(arg1 as *const u8, arg2 as *const *const u8, arg3 as *const *const u8) as u64,
         LINUX_SYS_EXIT => sys_exit_thread(arg1 as i32),
@@ -382,6 +397,7 @@ pub extern "C" fn syscall_dispatcher(
         LINUX_SYS_GETDENTS64 => sys_getdents64(arg1 as usize, arg2 as *mut u8, arg3 as usize) as u64,
         LINUX_SYS_SET_TID_ADDRESS => sys_set_tid_address(arg1 as *mut i32) as u64,
         LINUX_SYS_CLOCK_GETTIME => sys_clock_gettime(arg1 as i32, arg2 as *mut LinuxTimeSpec) as u64,
+<<<<<<< HEAD
         229 => { // clock_getres: the timer ticks at 1000 Hz
             let tp = arg2 as *mut LinuxTimeSpec;
             if !tp.is_null() {
@@ -394,6 +410,8 @@ pub extern "C" fn syscall_dispatcher(
         280 => 0,
         37 => 0,  // alarm: no SIGALRM delivery yet; no previous alarm pending
         141 => 0, // setpriority: a single priority class, accepted
+=======
+>>>>>>> 67740566240f8bc3cf3fa1dbde7456fa0a3e6ea6
         LINUX_SYS_CLOCK_NANOSLEEP => sys_clock_nanosleep(arg1 as i32, arg2 as i32, arg3 as *const LinuxTimeSpec, arg4 as *mut LinuxTimeSpec) as u64,
         LINUX_SYS_EXIT_GROUP => sys_exit(arg1 as i32),
         LINUX_SYS_EPOLL_WAIT | LINUX_SYS_EPOLL_PWAIT => epoll::sys_epoll_wait(arg1 as usize, arg2 as *mut epoll::EpollEvent, arg3 as i32, arg4 as i32) as u64,
@@ -1803,7 +1821,11 @@ pub fn sys_chdir(path_ptr: *const u8) -> isize {
 }
 
 pub fn sys_socket(domain: i32, sock_type: i32, protocol: i32) -> isize {
+<<<<<<< HEAD
     crate::lunix_strace!("  [SYS_SOCKET] domain={}, type={}, proto={}", domain, sock_type, protocol);
+=======
+    crate::lunix_serial_println!("  [SYS_SOCKET] domain={}, type={}, proto={}", domain, sock_type, protocol);
+>>>>>>> 67740566240f8bc3cf3fa1dbde7456fa0a3e6ea6
     let base_type = sock_type & 0xFF;
     if domain == unix_socket::AF_UNIX || domain == unix_socket::AF_LOCAL {
         let sock_arc = unix_socket::UnixSocket::new(domain, base_type, protocol);
@@ -1820,11 +1842,14 @@ pub fn sys_socket(domain: i32, sock_type: i32, protocol: i32) -> isize {
         }
     }
 
+<<<<<<< HEAD
     // Only AF_UNIX (above) and AF_INET exist. Others (AF_NETLINK, AF_PACKET, AF_INET6 ...)
     // must fail cleanly so callers such as getifaddrs() take their error path.
     if domain != 2 {
         return -97; // -EAFNOSUPPORT
     }
+=======
+>>>>>>> 67740566240f8bc3cf3fa1dbde7456fa0a3e6ea6
     let mut lock = crate::net::NET_STACK.lock();
     if let Some(ref mut stack) = *lock {
         let sid = stack.next_socket_id;
@@ -1860,7 +1885,11 @@ pub fn sys_socket(domain: i32, sock_type: i32, protocol: i32) -> isize {
 }
 
 pub fn sys_bind(sockfd: usize, addr: *const u8, addrlen: usize) -> isize {
+<<<<<<< HEAD
     crate::lunix_strace!("  [SYS_BIND] fd={}, addr={:p}, len={}", sockfd, addr, addrlen);
+=======
+    crate::lunix_serial_println!("  [SYS_BIND] fd={}, addr={:p}, len={}", sockfd, addr, addrlen);
+>>>>>>> 67740566240f8bc3cf3fa1dbde7456fa0a3e6ea6
     if let Some(proc_arc) = crate::task::scheduler::get_current_process() {
         let proc = proc_arc.lock();
         if let Some(desc_arc) = proc.get_fd(sockfd) {
@@ -1889,7 +1918,11 @@ pub fn sys_bind(sockfd: usize, addr: *const u8, addrlen: usize) -> isize {
 }
 
 pub fn sys_listen(sockfd: usize, backlog: usize) -> isize {
+<<<<<<< HEAD
     crate::lunix_strace!("  [SYS_LISTEN] fd={}, backlog={}", sockfd, backlog);
+=======
+    crate::lunix_serial_println!("  [SYS_LISTEN] fd={}, backlog={}", sockfd, backlog);
+>>>>>>> 67740566240f8bc3cf3fa1dbde7456fa0a3e6ea6
     if let Some(proc_arc) = crate::task::scheduler::get_current_process() {
         let proc = proc_arc.lock();
         if let Some(desc_arc) = proc.get_fd(sockfd) {
@@ -1903,7 +1936,11 @@ pub fn sys_listen(sockfd: usize, backlog: usize) -> isize {
 }
 
 pub fn sys_connect(sockfd: usize, addr: *const u8, addrlen: usize) -> isize {
+<<<<<<< HEAD
     crate::lunix_strace!("  [SYS_CONNECT] fd={}, addr={:p}, len={}", sockfd, addr, addrlen);
+=======
+    crate::lunix_serial_println!("  [SYS_CONNECT] fd={}, addr={:p}, len={}", sockfd, addr, addrlen);
+>>>>>>> 67740566240f8bc3cf3fa1dbde7456fa0a3e6ea6
     if let Some(proc_arc) = crate::task::scheduler::get_current_process() {
         let proc = proc_arc.lock();
         if let Some(desc_arc) = proc.get_fd(sockfd) {
@@ -1933,7 +1970,11 @@ pub fn sys_connect(sockfd: usize, addr: *const u8, addrlen: usize) -> isize {
 }
 
 pub fn sys_accept(sockfd: usize, addr: *mut u8, addrlen: *mut u32) -> isize {
+<<<<<<< HEAD
     crate::lunix_strace!("  [SYS_ACCEPT] fd={}", sockfd);
+=======
+    crate::lunix_serial_println!("  [SYS_ACCEPT] fd={}", sockfd);
+>>>>>>> 67740566240f8bc3cf3fa1dbde7456fa0a3e6ea6
     if let Some(proc_arc) = crate::task::scheduler::get_current_process() {
         let (sock_opt, flags) = {
             let proc = proc_arc.lock();
@@ -2027,7 +2068,11 @@ pub fn sys_getsockopt(_sockfd: usize, _level: i32, _optname: i32, _optval: *mut 
 }
 
 pub fn sys_socketpair(_domain: i32, sock_type: i32, _protocol: i32, sv: *mut [i32; 2]) -> isize {
+<<<<<<< HEAD
     crate::lunix_strace!("  [SYS_SOCKETPAIR] type={}", sock_type);
+=======
+    crate::lunix_serial_println!("  [SYS_SOCKETPAIR] type={}", sock_type);
+>>>>>>> 67740566240f8bc3cf3fa1dbde7456fa0a3e6ea6
     if sv.is_null() {
         return -14; // -EFAULT
     }
@@ -2047,7 +2092,10 @@ pub fn sys_socketpair(_domain: i32, sock_type: i32, _protocol: i32, sv: *mut [i3
             tx_buffer: s2c.clone(),
         },
         flags: if (sock_type & 0x800) != 0 { 0x800 } else { 0 },
+<<<<<<< HEAD
         open_fds: 1,
+=======
+>>>>>>> 67740566240f8bc3cf3fa1dbde7456fa0a3e6ea6
     }));
 
     let sock2 = alloc::sync::Arc::new(spin::Mutex::new(unix_socket::UnixSocket {
@@ -2062,7 +2110,10 @@ pub fn sys_socketpair(_domain: i32, sock_type: i32, _protocol: i32, sv: *mut [i3
             tx_buffer: c2s,
         },
         flags: if (sock_type & 0x800) != 0 { 0x800 } else { 0 },
+<<<<<<< HEAD
         open_fds: 1,
+=======
+>>>>>>> 67740566240f8bc3cf3fa1dbde7456fa0a3e6ea6
     }));
 
     if let unix_socket::UnixSocketState::Connected { ref mut peer, .. } = sock1.lock().state {
@@ -2108,6 +2159,7 @@ pub const POLLERR: i16 = 0x0008;
 pub const POLLHUP: i16 = 0x0010;
 pub const POLLNVAL: i16 = 0x0020;
 
+<<<<<<< HEAD
 /// Readiness of a single fd for the events in `events` (POLLIN/POLLOUT), or POLLNVAL.
 pub(crate) fn fd_poll_revents(fd: usize, events: i16) -> i16 {
     let Some(proc_arc) = crate::task::scheduler::get_current_process() else {
@@ -2296,6 +2348,75 @@ pub fn sys_sendto(sockfd: usize, buf: *const u8, len: usize, _flags: u32, _dest_
         return sys_write(sockfd, buf, len);
     }
     let _ = sockfd;
+=======
+pub fn sys_poll(fds: *mut LinuxPollFd, nfds: usize, timeout: i32) -> isize {
+    if fds.is_null() || nfds == 0 {
+        if timeout > 0 {
+            crate::task::scheduler::sleep_ms(timeout.min(50).max(0) as u64);
+        }
+        return 0;
+    }
+
+    let poll_slice = unsafe { slice::from_raw_parts_mut(fds, nfds) };
+    let proc_arc_opt = crate::task::scheduler::get_current_process();
+
+    let mut ready_count = 0;
+    for pfd in poll_slice.iter_mut() {
+        pfd.revents = 0;
+        if pfd.fd < 0 {
+            continue;
+        }
+
+        if let Some(ref proc_arc) = proc_arc_opt {
+            let proc = proc_arc.lock();
+            if let Some(desc_arc) = proc.get_fd(pfd.fd as usize) {
+                let desc = desc_arc.lock();
+                match desc.target {
+                    FdTarget::UnixSocket(ref sock) => {
+                        let sock_guard = sock.lock();
+                        if (pfd.events & POLLIN) != 0 && sock_guard.poll_read_ready() {
+                            pfd.revents |= POLLIN;
+                        }
+                        if (pfd.events & POLLOUT) != 0 && sock_guard.poll_write_ready() {
+                            pfd.revents |= POLLOUT;
+                        }
+                    }
+                    FdTarget::PipeRead(ref pipe) => {
+                        if (pfd.events & POLLIN) != 0 && pipe.lock().available_to_read() > 0 {
+                            pfd.revents |= POLLIN;
+                        }
+                    }
+                    FdTarget::PipeWrite(ref pipe) => {
+                        if (pfd.events & POLLOUT) != 0 && pipe.lock().available_to_write() > 0 {
+                            pfd.revents |= POLLOUT;
+                        }
+                    }
+                    FdTarget::VfsHandle { .. } | FdTarget::Stdin | FdTarget::Stdout | FdTarget::Stderr => {
+                        pfd.revents |= pfd.events & (POLLIN | POLLOUT);
+                    }
+                    _ => {
+                        pfd.revents |= pfd.events & (POLLIN | POLLOUT);
+                    }
+                }
+            } else {
+                pfd.revents = POLLNVAL;
+            }
+        }
+
+        if pfd.revents != 0 {
+            ready_count += 1;
+        }
+    }
+
+    if ready_count == 0 && timeout > 0 {
+        crate::task::scheduler::sleep_ms(timeout.min(10).max(0) as u64);
+    }
+
+    ready_count
+}
+
+pub fn sys_sendto(_sockfd: usize, buf: *const u8, len: usize, _flags: u32, _dest_addr: *const u8) -> isize {
+>>>>>>> 67740566240f8bc3cf3fa1dbde7456fa0a3e6ea6
     if buf.is_null() || len == 0 {
         return 0;
     }
@@ -2662,7 +2783,11 @@ pub fn sys_openat(dfd: i32, filename_ptr: *const u8, flags: u32) -> isize {
     };
 
     let resolved_path = resolve_at_path(dfd, path);
+<<<<<<< HEAD
     crate::lunix_strace!("  [SYS_OPENAT] dfd={}, path='{}', flags=0x{:X}", dfd, resolved_path, flags);
+=======
+    crate::lunix_serial_println!("  [SYS_OPENAT] dfd={}, path='{}', flags=0x{:X}", dfd, resolved_path, flags);
+>>>>>>> 67740566240f8bc3cf3fa1dbde7456fa0a3e6ea6
 
     let is_creat = (flags & 0x40) != 0;
     let is_excl = (flags & 0x80) != 0;
@@ -2768,7 +2893,11 @@ pub fn sys_openat(dfd: i32, filename_ptr: *const u8, flags: u32) -> isize {
                 },
                 flags,
             }) {
+<<<<<<< HEAD
                 crate::lunix_strace!("  [SYS_OPENAT_CREAT] Created dynamic in-memory file '{}' -> fd {}", resolved_path, fd);
+=======
+                crate::lunix_serial_println!("  [SYS_OPENAT_CREAT] Created dynamic in-memory file '{}' -> fd {}", resolved_path, fd);
+>>>>>>> 67740566240f8bc3cf3fa1dbde7456fa0a3e6ea6
                 return fd as isize;
             }
         }
@@ -2900,9 +3029,13 @@ pub fn sys_fstatat(dfd: i32, filename_ptr: *const u8, statbuf: *mut LinuxStat, f
         return 0;
     }
 
+<<<<<<< HEAD
     // AT_SYMLINK_NOFOLLOW (0x100) gives lstat semantics.
     let lookup = if (flags & 0x100) != 0 { crate::fs::vfs::lstat(&resolved) } else { crate::fs::vfs::stat(&resolved) };
     if let Ok(inode) = lookup {
+=======
+    if let Ok(inode) = crate::fs::vfs::stat(&resolved) {
+>>>>>>> 67740566240f8bc3cf3fa1dbde7456fa0a3e6ea6
         let mut hash = 0x811c9dc5u64;
         for b in resolved.as_bytes() {
             hash ^= *b as u64;
@@ -3415,7 +3548,11 @@ pub fn sys_unlinkat(dfd: i32, filename_ptr: *const u8, _flags: u32) -> isize {
     let slice = unsafe { core::slice::from_raw_parts(filename_ptr, len) };
     if let Ok(path) = core::str::from_utf8(slice) {
         let resolved = resolve_at_path(dfd, path);
+<<<<<<< HEAD
         crate::lunix_strace!("  [SYS_UNLINK] unlinking '{}'", resolved);
+=======
+        crate::lunix_serial_println!("  [SYS_UNLINK] unlinking '{}'", resolved);
+>>>>>>> 67740566240f8bc3cf3fa1dbde7456fa0a3e6ea6
         IN_MEMORY_FILES.lock().remove(&resolved);
     }
     0 // Unlink OK
